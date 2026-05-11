@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/matrisaver-core",
+    "crates/matrisaver-host-windows",
+    "crates/matrisaver-host-macos",
+    "crates/matrisaver-host-linux",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+authors = ["MatriSaver Contributors"]
+
+# Canonical "real release" profile — matches the I:\ project family
+# (Skeleton, MDReader, TinyBoothSoundStudio, examhelper).
+# Builds are slower; binaries are smaller and faster.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# Debuggable release: optimizations on, symbols kept. Use when a
+# release-mode bug needs a backtrace.
+#   cargo build --profile verbose
+[profile.verbose]
+inherits = "release"
+strip = "none"
+debug = true

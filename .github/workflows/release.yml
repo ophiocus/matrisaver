@@ -1,0 +1,150 @@
+# Tag-driven release. Push `vX.Y.Z` (or `vX.Y.Z.B`) to main, this
+# workflow runs the three gates on every supported OS, builds release
+# binaries on each, builds the Windows MSI via cargo-wix, and creates
+# a GitHub Release aggregating everything.
+#
+# KEEP IN SYNC WITH .github/workflows/ci.yml — toolchain version,
+# components, and the three gate commands must match. See the comment
+# block at the top of ci.yml for why.
+
+name: Release
+
+# Note: key MUST be quoted as "on" — see the matching comment in ci.yml.
+# Unquoted `on:` is parsed as YAML 1.1 boolean true by GitHub's workflow
+# indexer and the workflow silently refuses to register.
+"on":
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            host_crate: matrisaver-host-windows
+            binary: matrisaver-host-windows.exe
+            artifact_name: matrisaver-windows
+            build_msi: true
+          - os: ubuntu-latest
+            host_crate: matrisaver-host-linux
+            binary: matrisaver-host-linux
+            artifact_name: matrisaver-linux
+            build_msi: false
+          - os: macos-latest
+            host_crate: matrisaver-host-macos
+            binary: matrisaver-host-macos
+            artifact_name: matrisaver-macos
+            build_msi: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Pin to a specific stable so local-vs-CI clippy drift surfaces
+      # at PR time, not at tag-push time. Bump intentionally; don't
+      # silently inherit `@stable`. Versioned tags don't ship rustfmt
+      # or clippy by default — request them explicitly.
+      #
+      # KEEP IN SYNC WITH .github/workflows/ci.yml.
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      # Verify tag matches the workspace version. Run once on
+      # windows-latest only — same workspace Cargo.toml is checked out
+      # on every matrix leg, so once is enough and a triple-failure
+      # would just be noise.
+      - name: Verify tag matches workspace Cargo.toml version
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $tag   = "${{ github.ref_name }}" -replace '^v',''
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches.Groups[1].Value
+          if ($tag -ne $cargo) {
+            Write-Error "tag '$tag' does not match rust/Cargo.toml version '$cargo' — bump [workspace.package].version before tagging"
+            exit 1
+          }
+          echo "Release version: $tag"
+
+      # ── Quality gates. KEEP IN SYNC WITH ci.yml.
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --release -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --release
+
+      - name: cargo build --release
+        run: cargo build --release -p ${{ matrix.host_crate }}
+
+      - name: Install cargo-wix
+        if: matrix.build_msi
+        run: cargo install cargo-wix
+
+      - name: Download WiX 3.11 portable binaries
+        if: matrix.build_msi
+        shell: pwsh
+        run: |
+          $url  = 'https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311-binaries.zip'
+          $zip  = "$env:TEMP\wix311.zip"
+          $dest = "$env:TEMP\wix311"
+          Invoke-WebRequest $url -OutFile $zip
+          Expand-Archive $zip -DestinationPath $dest
+          echo "$dest" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build MSI installer
+        if: matrix.build_msi
+        # cargo-wix auto-defines -dVersion from the package's version;
+        # we don't pass our own (would collide with candle.exe CNDL0288).
+        # The cargo-wix metadata in matrisaver-host-windows/Cargo.toml
+        # locates wix/main.wxs next to that crate's Cargo.toml.
+        run: cargo wix --nocapture -p matrisaver-host-windows
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: rust/target/release/${{ matrix.binary }}
+
+      - name: Upload MSI
+        if: matrix.build_msi
+        uses: actions/upload-artifact@v5
+        with:
+          name: matrisaver-windows-msi
+          path: rust/target/wix/*.msi
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/matrisaver-windows/matrisaver-host-windows.exe
+            artifacts/matrisaver-linux/matrisaver-host-linux
+            artifacts/matrisaver-macos/matrisaver-host-macos
+            artifacts/matrisaver-windows-msi/*.msi
+          generate_release_notes: true

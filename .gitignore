@@ -1,0 +1,30 @@
+# Python prototype
+prototype/.venv/
+prototype/**/__pycache__/
+prototype/**/*.pyc
+prototype/.python-version
+
+# Local Rust build artifacts
+rust/target/
+rust/settings.json
+
+# Local binary/package artifacts
+*.exe
+*.scr
+*.msi
+*.pdb
+
+# Overlay assets are local-only by default
+assets/overlays/*
+!assets/overlays/README.md
+!assets/overlays/use/
+assets/overlays/use/*
+!assets/overlays/use/README.md
+
+# Source-resolution branding assets (4K PNG / 6K JPG from OpenArt) stay
+# local; only the downscaled web variants in assets/branding/ are tracked.
+assets/assets/
+
+# Runtime/validation artifacts are local-only by default.
+artifacts/*
+!artifacts/readme.md

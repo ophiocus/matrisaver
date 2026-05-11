@@ -1,0 +1,132 @@
+# ──────────────────────────────────────────────────────────────────────────
+#  CI — gates only (no build, no MSI, no release artefacts).
+# ──────────────────────────────────────────────────────────────────────────
+#
+#  Why this exists, separately from release.yml:
+#
+#  release.yml runs the same three gates inline before the platform
+#  builds, but only on tag-push. The I:\TinyBoothSoundStudio family
+#  learned the hard way that tag-time gates are too late:
+#
+#    • A clippy lint that didn't fire on the local toolchain but did on
+#      CI's stable failed at tag-push, burning a version number.
+#    • Pinning to a versioned tag (`@1.95.0`) silently dropped rustfmt
+#      and clippy, because versioned tags ship only the bare compiler
+#      unless `components: …` is requested explicitly. Burned again.
+#
+#  This workflow runs the gates on PR + push-to-main so drift surfaces
+#  at edit time, not at ship time.
+#
+#  ─────────────────────────────────────────────────────────────────────
+#  Maintenance overhead — KEEP IN SYNC WITH release.yml
+#  ─────────────────────────────────────────────────────────────────────
+#
+#  Three things must stay aligned across both workflows or the gate's
+#  whole point is defeated:
+#
+#    1. Toolchain version. Both files pin
+#       `dtolnay/rust-toolchain@<X.Y.Z>` to the same `<X.Y.Z>`. If they
+#       diverge, CI passes on toolchain A while the ship-time gate runs
+#       on B — the original drift problem.
+#
+#    2. Toolchain components. Both must declare
+#       `components: rustfmt, clippy`. A versioned-tag pin without this
+#       is what burned the family.
+#
+#    3. Gate command list. The same three commands run in both files:
+#         cargo fmt --check
+#         cargo clippy --workspace --all-targets --release -- -D warnings
+#         cargo test --workspace --release
+#       Adding a fourth gate (e.g. `cargo doc --no-deps`) means editing
+#       both files.
+#
+#  No reusable-workflow indirection on purpose: it would shift the sync
+#  problem from "two gate lists" to "two callers + one callee" and add
+#  ~1-2 min of extra runner spin-up to every release. The duplication is
+#  three commands; the comment is the discipline.
+#
+#  What's intentionally *different* from release.yml:
+#    * Trigger: PR + push-to-main + manual, vs tag-only.
+#    * No `Verify tag matches Cargo.toml version` step (no tag here).
+#    * No build, no MSI, no artefact upload, no release-notes step.
+#    * paths-ignore filters out doc/asset-only changes — none of the
+#      three gates would behave differently for those.
+#
+#  What's intentionally *different from the family's ci.yml*:
+#    * Three-OS matrix instead of windows-only. matrisaver-host-linux
+#      and matrisaver-host-macos are real workspace members that need
+#      to keep building per platform; matrisaver-core is portable and
+#      its tests should pass everywhere.
+#    * --workspace flags on clippy/test to cover all four crates.
+# ──────────────────────────────────────────────────────────────────────────
+
+name: CI
+
+# Note: key MUST be quoted as "on" — unquoted `on:` is parsed as the
+# YAML 1.1 boolean alias `true` by some parsers (including the one
+# GitHub's workflow indexer was using when the .github/workflows
+# directory first landed in this repo). Symptom: workflow file exists
+# on the default branch but never registers, never fires, and
+# `gh workflow list` doesn't show it.
+"on":
+  pull_request:
+    branches: [main, master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'prototype/**'
+      - '.gitignore'
+      - 'run-screensaver.cmd'
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'prototype/**'
+      - '.gitignore'
+      - 'run-screensaver.cmd'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cancel in-flight runs of this workflow on the same ref when a newer
+# commit arrives — saves runner minutes on rapid-fire pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # KEEP IN SYNC WITH release.yml: toolchain pin + components.
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      # KEEP IN SYNC WITH release.yml: gate command list.
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --release -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --release

@@ -1,0 +1,131 @@
+<?xml version='1.0' encoding='windows-1252'?>
+
+<!--
+  MatriSaver MSI installer.
+
+  Adapted from the I:\Skeleton\wix\main.wxs pattern but tailored for a
+  Windows screensaver (.scr), which has fundamentally different install
+  semantics than a regular .exe app:
+
+    * The file goes into [SystemFolder] (= %SystemRoot%\System32\) so
+      Windows scans it into the Display Properties → Screen Saver
+      Settings dropdown automatically. There is no PATH entry to add and
+      no Start Menu / Desktop shortcut to create — Windows itself is the
+      launcher.
+
+    * The build output is named matrisaver-host-windows.exe; the
+      installed copy is renamed to matrisaver.scr at install time.
+      Windows treats .scr the same as .exe for execution; only the
+      extension matters for the screensaver scan.
+
+    * InstallScope is perMachine: System32 is admin-only. There is no
+      per-user MatriSaver install today.
+
+  Known limitations of this scaffold (deferred to follow-up):
+
+    * Overlay assets are NOT installed. resolve_overlay_directory()
+      walks ancestors of the .exe path looking for assets/overlays/, and
+      System32 has no such ancestor. After install, the user must either
+      set MATRISAVER_OVERLAY_DIR or the overlay subsystem stays inert
+      (rain still works). Adding [CommonAppDataFolder] install + an
+      io.rs fallback is the next step.
+
+    * No code signing. The first MSI will trip SmartScreen — that's a
+      cert procurement question, not a WXS one.
+
+    * No assets/icon.ico in the repo yet, so we do not declare an
+      <Icon> element. ARP entry will use the Windows default. Add an
+      <Icon Id='ProductICO' SourceFile='assets\icon.ico'/> + the two
+      ARPPRODUCTICON / Shortcut Icon attributes once the asset lands.
+-->
+
+<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else ?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+<?endif ?>
+
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+    <Product
+        Id='*'
+        Name='MatriSaver'
+        UpgradeCode='D5DED742-76E6-45CA-AF48-7D9B55A3B920'
+        Manufacturer='ophiocus'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='Matrix-style digital rain Windows screensaver'
+            Manufacturer='ophiocus'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252'
+            />
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            AllowSameVersionUpgrades='yes'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='MatriSaver Installation'/>
+
+        <!--
+          Install matrisaver.scr directly into System32. The Source path
+          points at the cargo-built matrisaver-host-windows.exe; Name is
+          the destination filename. Windows treats .scr identically to
+          .exe for execution; the extension is what matters for
+          screensaver scanning.
+
+          KeyPath component identity must remain stable across upgrades,
+          so the GUID below is permanent — do not regenerate it.
+        -->
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='SystemFolder'>
+                <Component Id='ScreensaverBinary' Guid='352E329D-11F3-41AE-B9FE-789CAE253B78'>
+                    <File
+                        Id='MatrisaverScr'
+                        Name='matrisaver.scr'
+                        DiskId='1'
+                        Source='$(var.CargoTargetBinDir)\matrisaver-host-windows.exe'
+                        KeyPath='yes'/>
+                </Component>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id='Screensaver'
+            Title='Screensaver'
+            Description='Installs matrisaver.scr into the Windows System folder so it appears in Display Properties → Screen Saver Settings.'
+            Level='1'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='ScreensaverBinary'/>
+        </Feature>
+
+        <Property Id='ARPHELPLINK' Value='https://github.com/ophiocus/matrisaver'/>
+        <Property Id='ARPURLINFOABOUT' Value='https://github.com/ophiocus/matrisaver'/>
+
+        <!--
+          No <UI> block on purpose. A screensaver install is a one-file
+          drop into System32 — a multi-page wizard would be friction.
+          Windows Installer falls back to its default lightweight
+          progress dialog when no <UI> is declared, which is exactly
+          what a one-click install wants.
+
+          The earlier WixUI_Minimal attempt hit a hard dependency on
+          WixUILicenseRtf at light.exe link-time (WelcomeEulaDlg
+          hardcoded), and the CWD light runs in on the CI runner did
+          not match the relative `wix\License.rtf` value. Dropping the
+          UI sidesteps that entirely.
+        -->
+
+    </Product>
+
+</Wix>

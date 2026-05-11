@@ -1,0 +1,41 @@
+[package]
+name = "matrisaver-host-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+matrisaver-core = { path = "../matrisaver-core" }
+
+[target.'cfg(windows)'.dependencies]
+# Update check uses the GitHub Releases API. native-tls picks up Windows
+# SChannel — deliberately NOT rustls-tls (would re-pull ring). Keeping
+# this off the rustls path is the whole point of the deviation.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pollster = "0.4"
+raw-window-handle = "0.6"
+wgpu = "28"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+winres = "0.1"
+
+# cargo-wix metadata. The MSI WXS lives in wix/main.wxs next to this
+# Cargo.toml (matching the I:\ family convention) so cargo-wix's
+# default lookup finds it without needing --input on the CLI.
+[package.metadata.wix]
+name           = "matrisaver"
+product-name   = "MatriSaver"
+manufacturer   = "ophiocus"
+upgrade-guid   = "D5DED742-76E6-45CA-AF48-7D9B55A3B920"
+path-guid      = "352E329D-11F3-41AE-B9FE-789CAE253B78"
+license        = false
+eula           = false

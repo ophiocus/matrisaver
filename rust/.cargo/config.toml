@@ -1,0 +1,7 @@
+# Workspace-local cargo config.
+#
+# Faster MSVC incremental linking on Windows hosts. /INCREMENTAL trades
+# linker memory for shorter relinks during edit-build-test cycles. No
+# effect on Linux / macOS or on cross builds.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/INCREMENTAL"]
