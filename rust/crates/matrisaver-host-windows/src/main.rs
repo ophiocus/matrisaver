@@ -8,6 +8,11 @@ mod update_check;
 #[cfg(target_os = "windows")]
 use update_check::UpdateCheckResult;
 
+// Settings dialog for /c mode — pulls in eframe + rfd, same cfg-gate
+// reasoning as update_check above. On Linux/macOS /c is a no-op stub.
+#[cfg(target_os = "windows")]
+mod config_dialog;
+
 use matrisaver_core::config::{GlowQuality, Pipeline};
 use matrisaver_core::gpu::GpuSelectionOptions;
 use matrisaver_core::storage;
@@ -182,7 +187,42 @@ fn run_windows_lifecycle(
     }
 }
 
+/// Decide between the new egui settings dialog and the legacy stdout
+/// CLI handler. Display Properties' "Settings…" button passes only the
+/// `/c` token, so we open the dialog in that case. Any CLI override
+/// flag (or the explicit `--headless-config` opt-out) forces the
+/// headless path — preserves scripted/CI workflows that pass
+/// `--variant`, `--char-size`, etc. on the command line.
 fn run_config_mode(args: &[String]) {
+    let has_cli_overrides = parse_option_value(args, "--variant").is_some()
+        || parse_option_value(args, "--pipeline").is_some()
+        || parse_option_value(args, "--glow-quality").is_some()
+        || parse_option_value(args, "--char-size").is_some()
+        || parse_option_value(args, "--update-check-repo").is_some()
+        || has_flag(args, "--overlay")
+        || has_flag(args, "--no-overlay")
+        || has_flag(args, "--performance")
+        || has_flag(args, "--no-performance")
+        || has_flag(args, "--multi-monitor")
+        || has_flag(args, "--single-monitor")
+        || has_flag(args, "--skip-update-check")
+        || has_flag(args, "--headless-config");
+
+    #[cfg(target_os = "windows")]
+    if !has_cli_overrides {
+        if let Err(err) = config_dialog::open() {
+            eprintln!("Settings dialog failed: {err}");
+            std::process::exit(4);
+        }
+        return;
+    }
+
+    run_config_mode_headless(args);
+}
+
+/// Pre-egui CLI handler. Kept for scripting, CI tests, and non-Windows
+/// builds. Display Properties never reaches this path now.
+fn run_config_mode_headless(args: &[String]) {
     let mut settings = storage::load_settings_or_default(None);
 
     if let Some(variant) = parse_option_value(args, "--variant") {
