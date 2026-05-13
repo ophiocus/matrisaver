@@ -22,7 +22,7 @@
 // status line as it lands.
 
 use eframe::egui;
-use matrisaver_core::config::{variant_by_key, GlowQuality, Settings, VARIANTS};
+use matrisaver_core::config::{variant_by_key, GlowQuality, OverlaySource, Settings, VARIANTS};
 use matrisaver_core::storage;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -258,10 +258,93 @@ impl ConfigApp {
 
         ui.add_space(12.0);
 
+        // Overlays (collapsed by default)
+        egui::CollapsingHeader::new("Overlays")
+            .default_open(false)
+            .show(ui, |ui| self.render_overlays(ui));
+
+        ui.add_space(4.0);
+
         // Advanced (collapsed by default)
         egui::CollapsingHeader::new("Advanced")
             .default_open(false)
             .show(ui, |ui| self.render_advanced(ui));
+    }
+
+    fn render_overlays(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Directories searched for overlay images, in priority order. \
+                 Earlier entries win on filename collisions. With no entries, \
+                 matrisaver falls back to the MATRISAVER_OVERLAY_DIR env var \
+                 or assets/overlays/ relative to the exe.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(6.0);
+
+        let mut remove_index: Option<usize> = None;
+        for (index, source) in self.working.overlay_directories.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut source.enabled, "");
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(source.path.display().to_string()).monospace(),
+                    )
+                    .truncate(),
+                );
+                if ui.button("Remove").clicked() {
+                    remove_index = Some(index);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(28.0);
+                ui.checkbox(
+                    &mut source.write_ascii_alongside,
+                    "Write ASCII snapshot beside each image",
+                );
+            });
+            ui.add_space(2.0);
+        }
+        if let Some(index) = remove_index {
+            self.working.overlay_directories.remove(index);
+        }
+
+        if ui.button("+ Add directory…").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Pick overlay-image folder")
+                .pick_folder()
+            {
+                self.working.overlay_directories.push(OverlaySource {
+                    path,
+                    enabled: true,
+                    write_ascii_alongside: false,
+                });
+            }
+        }
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.working.overlay_auto_levels,
+                "Auto-level overlay luminance before glyph mapping",
+            );
+        });
+        ui.label(
+            egui::RichText::new(
+                "Helps low-contrast / clustered-histogram inputs by stretching \
+                 the 5th/95th percentiles to full range. Off by default — \
+                 matrisaver V2 defaults to passthrough per canonical \
+                 ASCII-conversion practice (jp2a, libcaca, Paul Bourke).",
+            )
+            .weak()
+            .small(),
+        );
     }
 
     fn render_advanced(&mut self, ui: &mut egui::Ui) {

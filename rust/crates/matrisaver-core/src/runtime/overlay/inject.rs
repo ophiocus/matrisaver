@@ -8,7 +8,11 @@ impl CoreRuntime {
         self.overlay_image_name = "none".to_owned();
         self.overlay_headers.clear();
         self.overlay_intro_glyphs.clear();
-        let tuning = self.load_overlay_tuning();
+        let mut tuning = self.load_overlay_tuning();
+        // Settings.overlay_auto_levels is the dialog-facing toggle and
+        // wins over whatever overlay_tuning.json says. The JSON
+        // surface stays available for power-users who hand-edit it.
+        tuning.auto_levels_enabled = self.settings.overlay_auto_levels;
         self.overlay_tuning = tuning;
         let image_paths = self.overlay_image_paths();
         if image_paths.is_empty() {
