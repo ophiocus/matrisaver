@@ -33,8 +33,30 @@ enum HostAction {
 }
 
 fn parse_scr_mode(args: &[String]) -> ScrMode {
+    // Helper for case-insensitive prefix strip on either / or - sigil.
+    fn strip_either(arg: &str, letter: char) -> Option<&str> {
+        let lower = arg.to_ascii_lowercase();
+        let needle_slash = format!("/{letter}:");
+        let needle_dash = format!("-{letter}:");
+        if lower.starts_with(&needle_slash) || lower.starts_with(&needle_dash) {
+            Some(&arg[needle_slash.len()..])
+        } else {
+            None
+        }
+    }
+
     for (index, arg) in args.iter().enumerate() {
+        // /c, -c, /c:HWND, -c:HWND, or /c HWND (separate arg). The
+        // egui dialog is top-level so we don't actually need the
+        // HWND — but Display Properties' Settings… button calls us
+        // with `/c:<decimal-HWND>`, and earlier versions of this
+        // parser only matched the bare `/c` form, falling through
+        // to ScrMode::Screensaver. That's why clicking Settings…
+        // ran the screensaver instead of opening the dialog.
         if arg.eq_ignore_ascii_case("/c") || arg.eq_ignore_ascii_case("-c") {
+            return ScrMode::Configure;
+        }
+        if strip_either(arg, 'c').is_some() {
             return ScrMode::Configure;
         }
         if arg.eq_ignore_ascii_case("/s") || arg.eq_ignore_ascii_case("-s") {
@@ -44,7 +66,7 @@ fn parse_scr_mode(args: &[String]) -> ScrMode {
             let hwnd = args.get(index + 1).and_then(|value| parse_hwnd(value));
             return ScrMode::Preview { parent_hwnd: hwnd };
         }
-        if let Some(raw) = arg.strip_prefix("/p:").or_else(|| arg.strip_prefix("-p:")) {
+        if let Some(raw) = strip_either(arg, 'p') {
             return ScrMode::Preview {
                 parent_hwnd: parse_hwnd(raw),
             };
@@ -1190,6 +1212,23 @@ mod tests {
     #[test]
     fn parses_config_mode() {
         assert_eq!(parse(&["matrisaver.scr", "/c"]), ScrMode::Configure);
+    }
+
+    #[test]
+    fn parses_config_mode_with_inline_hwnd() {
+        // Display Properties' "Settings…" button invokes the .scr
+        // with `/c:<decimal-HWND>` — the canonical Win32 convention
+        // for a settings-dialog parent. The egui dialog ignores the
+        // HWND but we must still recognize Configure mode here, or
+        // the parser falls through to Screensaver and clicking
+        // Settings… runs the screensaver. v0.1.0 through v0.1.5
+        // all shipped with this bug.
+        assert_eq!(
+            parse(&["matrisaver.scr", "/c:12345678"]),
+            ScrMode::Configure
+        );
+        assert_eq!(parse(&["matrisaver.scr", "-c:42"]), ScrMode::Configure);
+        assert_eq!(parse(&["matrisaver.scr", "/C:42"]), ScrMode::Configure);
     }
 
     #[test]

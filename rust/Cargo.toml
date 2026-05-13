@@ -10,7 +10,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.1.5"
+version = "0.1.6"
 authors = ["MatriSaver Contributors"]
 
 # Canonical "real release" profile — matches the I:\ project family
