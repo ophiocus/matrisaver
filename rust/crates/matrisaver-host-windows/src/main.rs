@@ -194,27 +194,33 @@ fn run_windows_lifecycle(
 /// headless path — preserves scripted/CI workflows that pass
 /// `--variant`, `--char-size`, etc. on the command line.
 fn run_config_mode(args: &[String]) {
-    let has_cli_overrides = parse_option_value(args, "--variant").is_some()
-        || parse_option_value(args, "--pipeline").is_some()
-        || parse_option_value(args, "--glow-quality").is_some()
-        || parse_option_value(args, "--char-size").is_some()
-        || parse_option_value(args, "--update-check-repo").is_some()
-        || has_flag(args, "--overlay")
-        || has_flag(args, "--no-overlay")
-        || has_flag(args, "--performance")
-        || has_flag(args, "--no-performance")
-        || has_flag(args, "--multi-monitor")
-        || has_flag(args, "--single-monitor")
-        || has_flag(args, "--skip-update-check")
-        || has_flag(args, "--headless-config");
-
+    // `has_cli_overrides` is only consulted on Windows — the egui
+    // dialog only exists there. Keeping the calculation inside the
+    // cfg-gated block stops the Linux/macOS release builds from
+    // tripping clippy's unused_variables under -D warnings.
     #[cfg(target_os = "windows")]
-    if !has_cli_overrides {
-        if let Err(err) = config_dialog::open() {
-            eprintln!("Settings dialog failed: {err}");
-            std::process::exit(4);
+    {
+        let has_cli_overrides = parse_option_value(args, "--variant").is_some()
+            || parse_option_value(args, "--pipeline").is_some()
+            || parse_option_value(args, "--glow-quality").is_some()
+            || parse_option_value(args, "--char-size").is_some()
+            || parse_option_value(args, "--update-check-repo").is_some()
+            || has_flag(args, "--overlay")
+            || has_flag(args, "--no-overlay")
+            || has_flag(args, "--performance")
+            || has_flag(args, "--no-performance")
+            || has_flag(args, "--multi-monitor")
+            || has_flag(args, "--single-monitor")
+            || has_flag(args, "--skip-update-check")
+            || has_flag(args, "--headless-config");
+
+        if !has_cli_overrides {
+            if let Err(err) = config_dialog::open() {
+                eprintln!("Settings dialog failed: {err}");
+                std::process::exit(4);
+            }
+            return;
         }
-        return;
     }
 
     run_config_mode_headless(args);
