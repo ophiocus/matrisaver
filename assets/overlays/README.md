@@ -1,53 +1,82 @@
 # Overlay Assets
 
-This directory stores optional source images for the ASCII overlay effect used by the
-Rust runtime (and the legacy Python/Pygame prototype).
+Optional source images for the ASCII overlay effect — silhouettes that
+emerge briefly from the rain when overlay mode is on. Drop high-contrast
+portrait-style images here (or in any directory you add via Settings →
+Overlays) and the engine ASCII-fies them at injection time.
 
-## How the ASCII overlay behaves
+## How the engine sees images (V2)
 
-- When overlay mode is enabled (`--enable-overlay`), the app loads images from this folder.
-- Images are converted into a grid of glyphs using an internal density gradient.
-- Darker pixels map to lighter/sparser glyphs (left side of the gradient), and brighter pixels map
-  to denser glyphs (right side).
-- The matrix rain animation then reveals and fades that glyph image in timed phases (`intro`,
-  hold, `outro`) while regular rain continues around and through it.
+- 2×2 super-sampled luminance per overlay grid cell, weighted by
+  Rec. 709 RGB → Y.
+- Optional auto-levels remap (5th/95th percentile stretch), off by
+  default. Toggle in Settings → Overlays.
+- Direct map of shaped luminance to a density-ramp glyph
+  (`.:-=+*<>¦｜/\\`), darker pixels → sparser glyphs.
+- No denoise / CLAHE / unsharp / gamma / contrast preprocessing — V2
+  defaults to passthrough per canonical practice (jp2a, libcaca,
+  Paul Bourke). The 7-stage pipeline that lived here through v0.1.x
+  is gone.
 
 ## Asset guidance
 
-- Prefer high-contrast images for clearer ASCII silhouettes.
-- Keep source files local; this repository ignores all files in `assets/overlays/` except this
-  README and the `use/` subfolder README.
-- Supported image types include `.png`, `.jpg`, `.jpeg`, `.bmp`, `.gif`, `.tga`, `.tiff`, `.webp`.
+- High-contrast subjects work best. Portraits, logos, single
+  silhouettes against a flat background — anything where the eye
+  reads a clear figure-ground split survives downsampling to a
+  20–40 cell grid.
+- Photographic mid-tones flatten out — turn on auto-levels in the
+  dialog if the result looks washed out.
+- Supported image types: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.gif`,
+  `.tga`, `.tiff`, `.webp`.
+- This `assets/overlays/` directory is gitignored (except this
+  README) so local images don't pollute the repo.
 
-## The `use/` subfolder
+## Multi-directory supply
 
-`assets/overlays/use/` is a managed cache — **do not put images there directly**.
-Drop source images into this directory instead.
+Settings → Overlays accepts an ordered list of folders. Each row:
 
-On startup the app syncs origin → `use/`:
-- New images in this folder are preprocessed (auto-contrast, 1.5× contrast boost, unsharp
-  mask) and copied into `use/`.
-- Images removed from this folder are deleted from `use/`.
-- The app displays images exclusively from `use/`; source originals are never modified.
+```
+[ ✓ ] C:\Users\Carlos\Pictures\matrisaver-overlays   [Remove]
+       [ ✓ Write ASCII snapshot beside each image ]
+[ ✓ ] %PROGRAMDATA%\matrisaver\overlays              [Remove]
+       [   Write ASCII snapshot beside each image   ]
+```
 
-## Overlay Filter Tuning Config
+Earlier entries win on filename collisions. Empty list falls back to
+the legacy resolution chain:
 
-You can optionally tune overlay filter parameters with a local JSON file.
+1. `MATRISAVER_OVERLAY_DIR` environment variable.
+2. `assets/overlays/` walking ancestors of the running binary.
+3. Same walk against the current working directory.
 
-Resolution order:
+## ASCII-alongside snapshot (opt-in per directory)
 
-- `MATRISAVER_OVERLAY_TUNING_PATH` (explicit file path), otherwise
-- `assets/overlays/overlay_tuning.json`, otherwise
-- `assets/overlays/overlay_config.json`.
+When the "Write ASCII snapshot" checkbox is on for a directory and
+that directory is writable, the engine drops a plain-text rendering
+of each overlay next to the source on each injection:
 
-Example:
+```
+neo.png   →   neo.png.ascii.txt
+logo.jpg  →   logo.jpg.ascii.txt
+```
+
+The text file mirrors the exact glyph grid the runtime drew (alpha
+boundary as spaces, density ramp inside). Useful for previewing how
+an image will look without launching the screensaver.
+
+Writability is probed once per session per directory. Read-only
+directories are silently skipped — no error surfacing, no retries.
+
+## Power-user JSON tuning
+
+Hand-edit `overlay_tuning.json` in any overlay directory (or set
+`MATRISAVER_OVERLAY_TUNING_PATH`) to override individual fields:
 
 ```json
 {
   "alpha_cutoff": 0.03,
   "luma_weights": [0.18, 0.74, 0.08],
-  "gamma": 1.0,
-  "contrast": 1.0,
+  "auto_levels_enabled": false,
   "levels_low_percentile": 0.05,
   "levels_high_percentile": 0.95,
   "brightness_floor": 0.10,
@@ -55,17 +84,14 @@ Example:
   "header_brightness_scale": 2.0,
   "intro_density_multiplier_x": 2.0,
   "intro_glyph_scale": 0.5,
-  "intro_layer_brightness_scale": 1.0,
-  "denoise_mode": "none",
-  "denoise_strength": 0.25,
-  "clahe_enabled": false,
-  "clahe_clip_limit": 2.0,
-  "clahe_tile_grid": [8, 8],
-  "unsharp_enabled": false,
-  "unsharp_amount": 0.35
+  "intro_layer_brightness_scale": 1.0
 }
 ```
 
-Defaults are intentionally neutral for contrast shaping (`gamma = 1.0`, `contrast = 1.0`).
-The preprocessing stages are opt-in by default (`denoise_mode = "none"`, `clahe_enabled = false`,
-`unsharp_enabled = false`).
+All fields are optional. Settings dialog → "Auto-level overlay
+luminance" wins over the JSON's `auto_levels_enabled` when they
+disagree — the dialog is the source of truth.
+
+Legacy JSON files with fields like `gamma`, `contrast`, `denoise_mode`,
+`clahe_*`, or `unsharp_*` parse cleanly but their values are ignored —
+those filters were removed in v0.2.0.

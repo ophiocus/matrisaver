@@ -28,13 +28,14 @@ All file references are crate-relative under
 |---|---|---|
 | Trigger / state machine / lock management | `runtime/overlay/state.rs` | When to start, when to stop, what to clean up |
 | Image and tuning I/O | `runtime/overlay/io.rs` | Directory resolution, tuning JSON, image enumeration, glyph-atlas lookup |
-| Per-cell sampling and luminance preprocessing | `runtime/overlay/image.rs` | Pixel sampling, denoise, CLAHE, unsharp, auto-levels, glyph-from-luminance mapping |
-| Image-to-grid orchestration | `runtime/overlay/inject.rs` | Per-injection pipeline: load image → fit to grid → preprocess → build header & intro target sets |
+| Per-cell sampling and glyph mapping | `runtime/overlay/image.rs` | 2×2 super-sample, opt-in auto-levels remap, density-ramp glyph lookup. V2 dropped the 7-stage filter pipeline. |
+| Image-to-grid orchestration | `runtime/overlay/inject.rs` | Per-injection pipeline: load image → fit to grid → sample → glyph-map → build header & intro target sets → optional ASCII-alongside snapshot |
 | Per-frame instance emission | `runtime/overlay/emit.rs` | Render-phase output: turns header / intro state into `GlyphInstance`s |
-| Runtime fields and lifecycle hook | `lib.rs` (CoreRuntime) | `overlay_*` fields, `set_overlay_reference_rect` / `clear_overlay_reference_rect`, intro-mode default |
+| Runtime fields and lifecycle hook | `lib.rs` (CoreRuntime) | `overlay_*` fields, `set_overlay_reference_rect` / `clear_overlay_reference_rect`, intro-mode default, `overlay_dir_writable` probe cache |
 | Caller (per-frame) | `runtime/lifecycle/frame.rs` | Calls `update_overlay_state` early; calls the two `emit_overlay_*_instances` at the end of `build_stream_instances` |
 | Frozen-cell behavior in rain lifecycle | `runtime/lifecycle/cells.rs` | `cell.frozen` flag is honored by `write_head_row`, `erase_row`, and `update_volatile_cells` so locked overlay cells survive the rain advancing past them |
-| Constants and types | `runtime/types.rs` | `OVERLAY_*` timing/format constants, `OverlayHeader`, `OverlayIntroGlyph`, `OverlayTargetCell`, `OverlayIntroMode`, `OverlayTuning`, `OverlayDenoiseMode`, `OverlayTuningConfig` |
+| Constants and types | `runtime/types.rs` | `OVERLAY_*` timing/format constants, `OverlayHeader`, `OverlayIntroGlyph`, `OverlayTargetCell`, `OverlayIntroMode`, `OverlayTuning`, `OverlayTuningConfig` |
+| User-facing settings | `lib.rs` (`config::Settings`) | `overlay_enabled`, `overlay_directories: Vec<OverlaySource>`, `overlay_auto_levels` |
 
 These files are `include!`'d into `lib.rs` rather than declared as sub-
 modules, so all impls extend `CoreRuntime` in the lib's root namespace.
@@ -48,35 +49,34 @@ Three axes of input get resolved separately and combined inside
 
 ### 1. Where to look — directory resolution
 
-`resolve_overlay_directory()` (in `runtime/overlay/io.rs`) tries, in
-order:
+V2 resolution is driven by `Settings.overlay_directories`, an ordered
+list of `OverlaySource { path, enabled, write_ascii_alongside }`.
+`overlay_image_paths()` walks enabled sources in declaration order,
+collecting any file whose extension matches `OVERLAY_IMAGE_EXTENSIONS`
+(`png, jpg, jpeg, bmp, gif, tga, tiff, webp`). Earlier sources win
+on filename collisions (dedupe via `HashSet<OsString>`).
+
+When `Settings.overlay_directories` is empty (e.g. fresh install
+before the user adds anything via the dialog), resolution falls back
+to the legacy chain in `resolve_overlay_directory()`:
 
 1. `MATRISAVER_OVERLAY_DIR` env var, if it points at a real directory.
 2. Walking ancestors of `std::env::current_exe()` looking for
-   `assets/overlays/`. This is the install-time path: the MSI lays out
-   `assets/` next to the binary.
+   `assets/overlays/`.
 3. Walking ancestors of `std::env::current_dir()` looking for
-   `assets/overlays/`. This is the dev path: `cargo run` from the
-   workspace root finds `H:\matrisaver\assets\overlays\`.
-4. `option_env!("CARGO_MANIFEST_DIR")` — the compile-time crate
-   manifest dir, climbed three levels and joined with `assets/overlays`.
-   Pure dev fallback for IDE-launched tests.
+   `assets/overlays/`.
+4. `option_env!("CARGO_MANIFEST_DIR")` — compile-time dev fallback.
 
 If none resolve, overlay enumeration returns empty and the trigger
 short-circuits.
 
-### 2. What images to load
+### 2. Which images to play
 
-`overlay_image_paths()` reads the resolved directory and keeps every
-file whose extension matches `OVERLAY_IMAGE_EXTENSIONS`:
-`png, jpg, jpeg, bmp, gif, tga, tiff, webp`. The list is sorted, then
-walked round-robin via `overlay_image_cursor` so successive overlays
-cycle through every image before repeating.
-
-Note: there is currently no Rust-side equivalent of the prototype
-Python's `assets/overlays/use/` cache. The Rust runtime reads directly
-from `assets/overlays/`. The "use/" workflow is prototype-only at
-present; see *Open coupling concerns* below.
+`overlay_image_paths()` returns `Vec<(PathBuf, bool)>` where the
+second element is `write_ascii_alongside` for the source the file
+came from. The sorted-per-source list is walked round-robin via
+`overlay_image_cursor` so successive overlays cycle through every
+image before repeating.
 
 ### 3. How to tune the conversion
 
@@ -118,42 +118,31 @@ Two passes are run with different `(fit_cols, fit_rows)`:
   between rain columns to thicken the silhouette before the headers
   arrive. Default multiplier is 2.0.
 
-### 5. Luminance preprocessing pipeline
+### 5. Shaping (V2 — passthrough by default)
 
-`preprocess_overlay_luminance` runs **twice** (once per pass) over the
-luminance buffer, in this order:
+Pre-v0.2.0 there was a seven-stage pipeline (denoise → CLAHE →
+unsharp → auto-levels → gamma → contrast → glyph). Research synthesis
+(jp2a, libcaca, Paul Bourke) showed every canonical ASCII-conversion
+tool defaults to passthrough; the heavy pipeline was matrisaver's
+outlier behavior, flattening silhouettes via denoise and amplifying
+grid noise via unsharp.
 
-1. **Denoise.** Three modes:
-   - `none` — default, no-op.
-   - `median` — radius 1/2/3 depending on `denoise_strength` (<0.35,
-     <0.75, otherwise). Standard median over the alpha-masked window.
-   - `bilateral` — same radius schedule, with edge-preserving
-     spatial+range Gaussians. Slower but keeps silhouette edges
-     sharp on noisy photographs.
-2. **CLAHE** (contrast-limited adaptive histogram equalization), if
-   `clahe_enabled`. 64-bin per-tile histograms over the
-   `clahe_tile_grid` (default 8×8), clip-limited by
-   `clahe_clip_limit`, redistributed across bins.
-3. **Unsharp mask**, if `unsharp_enabled`. 3×3 Gaussian blur subtracted
-   from source and added back at `unsharp_amount × detail`.
+V2 keeps **only the bits that are demonstrably part of "the ASCII
+engine itself"**, not filtering imposed on top:
 
-Every pass respects `tuning.alpha_cutoff` — fully transparent pixels
-contribute zero weight and are skipped during reads/writes so the
-silhouette boundary stays clean.
-
-### 6. Auto-levels, gamma, contrast → glyph index
-
-After preprocessing, per-cell luminance is shaped through:
-
-1. **Auto-levels.** `auto_levels` sorts the alpha-masked luminance
-   values and pulls `(low, high)` percentiles (defaults
-   `(0.05, 0.95)`). `remap_level` linearly remaps each value from
-   `[low, high]` to `[0, 1]`.
-2. **Gamma.** Power curve via `tuning.gamma` (default 1.0 — neutral),
-   clamped to `[0.2, 3.0]`.
-3. **Contrast.** `((value - 0.5) * contrast) + 0.5`, clamped to
-   `[0, 1]` (default 1.0 — neutral).
-4. **Glyph mapping.** `overlay_glyph_index_for_luminance` maps the
+1. **Alpha cutoff.** Pixels with `alpha < tuning.alpha_cutoff` are
+   silhouette boundary — they render as spaces in the snapshot and
+   contribute nothing to header/intro glyph emission. Not a filter,
+   a topological op.
+2. **Auto-levels (opt-in).** When `Settings.overlay_auto_levels` is
+   true: `auto_levels` sorts alpha-masked luminance and pulls
+   `(low, high)` at `levels_low_percentile` / `levels_high_percentile`
+   (defaults `(0.05, 0.95)`); `remap_level` linearly stretches each
+   value from `[low, high]` to `[0, 1]`. Otherwise raw luminance
+   goes straight to glyph mapping. Defensible for low-contrast /
+   clustered-histogram inputs; harmful for already-high-contrast
+   silhouettes. Off by default.
+3. **Glyph mapping.** `overlay_glyph_index_for_luminance` maps the
    shaped value through `OVERLAY_DENSITY_GLYPHS = ".:-=+*<>¦｜/\\"` —
    13 glyphs from sparse to dense — and looks up the corresponding
    atlas index. Falls back to `*`, then `+`, then a proportional
@@ -161,6 +150,35 @@ After preprocessing, per-cell luminance is shaped through:
 
 The result for each grid cell is `(glyph_index, brightness)` where
 `brightness = clamp(brightness_floor + shaped × alpha × brightness_scale, brightness_floor, 1.0)`.
+
+The dialog's "Auto-level overlay luminance" toggle is the source of
+truth; `overlay_tuning.json::auto_levels_enabled` is honored only
+when the Settings field is also true (the dialog field overrides on
+each `inject_overlay_from_image`).
+
+### 6. ASCII-alongside snapshot (opt-in per source)
+
+Each `OverlaySource` has a `write_ascii_alongside: bool`. When true
+and the directory passes the idempotent writability probe
+(`probe_overlay_dir_writable` — writes/removes a zero-byte file once
+per session, caches the result on `CoreRuntime.overlay_dir_writable`),
+`write_overlay_ascii_alongside` drops a plain-text rendering of the
+glyph grid next to each source image:
+
+```
+neo.png   →   neo.png.ascii.txt
+logo.jpg  →   logo.jpg.ascii.txt
+```
+
+The text rendering uses `render_overlay_grid_text`, which mirrors the
+same alpha-cutoff and auto-levels gates as the live render. Cells
+below the cutoff render as spaces so the silhouette boundary is
+visible.
+
+Failures (read-only directory, write error mid-stream, etc.) are
+silent — the entry in `overlay_dir_writable` flips to `false` and
+all subsequent injections from that directory skip the write. No
+error surfacing per the V2 contract.
 
 ## How it latches onto the runtime
 
@@ -356,9 +374,8 @@ this section gives the engineering view.
 |---|---|---|---|
 | `alpha_cutoff` | 0.03 | 0–1 | Min alpha for a pixel to participate at all |
 | `luma_weights` | `[0.18, 0.74, 0.08]` | per-channel | RGB → luminance weighting (Rec. 709 luma) |
-| `gamma` | 1.0 | 0.2–3.0 | Power curve on shaped luminance |
-| `contrast` | 1.0 | unbounded | Push-pull around mid-gray |
-| `levels_low_percentile` | 0.05 | 0–1 | Lower auto-levels percentile |
+| `auto_levels_enabled` | false | bool | Opt-in percentile-based contrast stretch. Settings dialog field `overlay_auto_levels` overrides this on each inject. |
+| `levels_low_percentile` | 0.05 | 0–1 | Lower auto-levels percentile (only used when auto-levels is on) |
 | `levels_high_percentile` | 0.95 | 0–1 | Upper auto-levels percentile |
 | `brightness_floor` | 0.10 | 0–1 | Minimum brightness for a contributing cell (keeps silhouette visible against bright rain) |
 | `brightness_scale` | 0.95 | 0+ | Multiplier on `(shaped × alpha)` before clamping |
@@ -366,72 +383,57 @@ this section gives the engineering view.
 | `intro_density_multiplier_x` | 2.0 | round to ≥1 | Sub-column intro density (2 = one extra glyph per column) |
 | `intro_glyph_scale` | 0.5 | 0+ | Intro glyph size relative to char_size |
 | `intro_layer_brightness_scale` | 1.0 | 0+ | Intro brightness multiplier |
-| `denoise_mode` | `"none"` | `none`/`median`/`bilateral` | Pre-equalization smoothing |
-| `denoise_strength` | 0.25 | 0–1 | Filter radius selector |
-| `clahe_enabled` | false | bool | Per-tile contrast-limited histogram equalization |
-| `clahe_clip_limit` | 2.0 | ≥0.5 | Contrast cap per tile |
-| `clahe_tile_grid` | `[8, 8]` | u32 pair | Tile count |
-| `unsharp_enabled` | false | bool | 3×3 Gaussian-based sharpening |
-| `unsharp_amount` | 0.35 | 0–2 | Detail multiplier |
 
-Defaults are intentionally **shape-neutral** (gamma=1, contrast=1) and
-**preprocessing-off** (denoise=none, CLAHE off, unsharp off). The
-auto-levels stage alone handles most contrast normalization for typical
-photographs; the heavier filters are opt-in for difficult sources.
+V2 dropped these fields entirely (`OverlayDenoiseMode` enum +
+`denoise_mode`, `denoise_strength`, `clahe_enabled`, `clahe_clip_limit`,
+`clahe_tile_grid`, `unsharp_enabled`, `unsharp_amount`, `gamma`,
+`contrast`). Legacy JSON files carrying them parse cleanly — serde
+ignores unknown fields by default — but the values are discarded.
 
 ## Open coupling concerns
 
 These are real seams worth knowing about, not bugs.
 
-### 1. `assets/overlays/use/` is prototype-only
-
-`prototype/src/rendering/ascii_overlay.py::_sync_use_folder` mirrors
-`assets/overlays/` → `assets/overlays/use/`, applying Pillow
-auto-contrast + 1.5× contrast + unsharp mask along the way. The Rust
-runtime, however, reads directly from `assets/overlays/` — it does
-**not** look at `use/`. So:
-
-- The Rust runtime does its own preprocessing in
-  `preprocess_overlay_luminance`. Pillow's preprocessing is redundant
-  for Rust runs.
-- The user-facing README implies the Rust runtime reads from `use/`.
-  It doesn't, today. Either the README needs updating, or the Rust
-  runtime needs to learn `use/` lookup, or sync logic should move to
-  install-time tooling.
-
-### 2. Pillow-missing fallback silently changes behavior
-
-In the prototype, `_preprocess_and_save` falls through to
-`shutil.copy2` if Pillow isn't importable. Two installations with the
-same source images can produce visually different overlays. Mitigation
-is either a startup warning or making Pillow a hard requirement
-(`requirements.txt` already lists it; it's the import-error fallback
-that's the leak).
-
-### 3. Tuning resolution layer is untested
+### 1. Tuning resolution layer is untested
 
 `OverlayTuning::with_overrides` and `OverlayTuningConfig` parsing have
-unit tests (`overlay_tuning_defaults_keep_neutral_shaping`,
-`overlay_tuning_parses_extended_fields` in `lib.rs`). The
-file-resolution layer in `resolve_overlay_tuning_path` — env var
-beats `overlay_tuning.json` beats `overlay_config.json` — is not
-exercised by any test. A regression that swaps the precedence wouldn't
-be caught.
+unit tests in `lib.rs`. The file-resolution layer in
+`resolve_overlay_tuning_path` — env var beats `overlay_tuning.json`
+beats `overlay_config.json` — is not exercised by any test. A
+regression that swaps the precedence wouldn't be caught.
 
-### 4. Round-robin cursor wraps but isn't randomized
+### 2. Round-robin cursor wraps but isn't randomized
 
 `overlay_image_cursor` walks paths in sorted order and wraps. With a
 small image set this produces a perfectly predictable cycle. Switching
 to a per-injection random pick (or a Knuth-shuffled deck) is a
 trivial change but would feel less mechanical.
 
-### 5. No abort-mid-headers path
+### 3. No abort-mid-headers path
 
 If the user disables overlays via settings while headers are still
 falling, `clear_overlay_locks` runs immediately but in-flight headers
 keep emitting until the next `update_overlay_state` tick. Cosmetic
 only — they unlock and unfreeze instantly, but the visible header
 glyph still draws for one frame.
+
+### 4. ASCII-alongside writer doesn't snapshot intro glyphs
+
+`render_overlay_grid_text` walks the header pass only (`fit_cols ×
+fit_rows`), not the dense intro pass. The `.ascii.txt` snapshot
+represents what the header layer draws, not the full visual including
+the sub-column ghost glyphs. Fine for "what will this image look
+like" preview but not bit-exact to the live render.
+
+### 5. Tuning JSON path resolution still walks "the overlay directory"
+
+`resolve_overlay_tuning_path` looks for `overlay_tuning.json` /
+`overlay_config.json` in the legacy single-directory location (via
+`resolve_overlay_directory()`). It doesn't search each entry of
+`Settings.overlay_directories`. If a user has multiple sources, only
+the first one's tuning JSON gets picked up — and only if it matches
+the legacy resolution. Tractable, but the dialog's auto-levels toggle
+sidesteps this for the most-needed setting.
 
 ## Public API surface (host-facing)
 
@@ -442,15 +444,20 @@ Only these exit `matrisaver-core`:
   pin the overlay to the primary monitor's pixel rect.
 - `CoreRuntime::clear_overlay_reference_rect()` — opt back out to
   full-surface overlays.
-- `Settings.overlay_enabled` (in `config::Settings`) — kill switch;
+- `config::Settings.overlay_enabled` — kill switch;
   `update_overlay_state` short-circuits when false and clears
   everything on the first tick where it sees false.
+- `config::Settings.overlay_directories: Vec<OverlaySource>` — V2
+  directory list (path + enabled + write_ascii_alongside per entry).
+- `config::Settings.overlay_auto_levels` — V2 top-level toggle for
+  the percentile contrast stretch. Wins over `overlay_tuning.json`'s
+  `auto_levels_enabled` field.
 
-Everything else (state, tuning, lock list, headers, intro glyphs) is
-private. The host treats overlays as an internal feature of the rain
-renderer.
+Everything else (state, tuning, lock list, headers, intro glyphs,
+write probe cache) is private. The host treats overlays as an
+internal feature of the rain renderer.
 
-## Quick reference — the call graph
+## Quick reference — the call graph (V2)
 
 ```
 build_stream_instances (runtime/lifecycle/frame.rs)
@@ -461,17 +468,18 @@ build_stream_instances (runtime/lifecycle/frame.rs)
   │     └── inject_overlay_from_image (runtime/overlay/inject.rs)  [if trigger fired]
   │           ├── load_overlay_tuning (runtime/overlay/io.rs)
   │           │     └── resolve_overlay_tuning_path
+  │           │     └── (Settings.overlay_auto_levels overrides tuning.auto_levels_enabled)
   │           ├── overlay_image_paths (runtime/overlay/io.rs)
+  │           │     └── walks Settings.overlay_directories (or legacy fallback)
   │           ├── image::open / to_rgba8
   │           ├── sample_overlay_cell (runtime/overlay/image.rs)         [×2 passes]
-  │           ├── preprocess_overlay_luminance                           [×2 passes]
-  │           │     ├── apply_overlay_median_filter      [if median]
-  │           │     ├── apply_overlay_bilateral_filter   [if bilateral]
-  │           │     ├── apply_overlay_clahe              [if enabled]
-  │           │     └── apply_overlay_unsharp            [if enabled]
-  │           ├── auto_levels / remap_level / gamma / contrast
+  │           ├── (optional) auto_levels / remap_level                   [if auto_levels_enabled]
   │           ├── overlay_glyph_index_for_luminance (runtime/overlay/image.rs)
-  │           └── (builds overlay_headers + overlay_intro_glyphs)
+  │           ├── (builds overlay_headers + overlay_intro_glyphs)
+  │           └── (optional) write_overlay_ascii_alongside               [if source opted in]
+  │                 ├── probe_overlay_dir_writable                       [cached per session]
+  │                 ├── render_overlay_grid_text
+  │                 └── std::fs::write(<image>.<ext>.ascii.txt)
   ├── (per-column rain lifecycle — runtime/lifecycle/{column,cells,reset}.rs)
   │     └── frozen cells short-circuit write_head_row / erase_row
   └── emit instances:
