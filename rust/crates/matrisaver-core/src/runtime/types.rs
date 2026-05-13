@@ -54,64 +54,60 @@ enum OverlayIntroMode {
     WaveLeftToRight,
 }
 
+/// Overlay tuning — V2.
+///
+/// Image-filtering fields (`denoise_*`, `clahe_*`, `unsharp_*`,
+/// `gamma`, `contrast`) were dropped in v0.2.0 after research showed
+/// every canonical ASCII-conversion tool (jp2a, libcaca, Paul
+/// Bourke's reference) defaults to passthrough and exposes
+/// adjustments only as user-controlled options. The seven-stage
+/// pre-ASCII pipeline matrisaver had been running by default was
+/// the outlier — it flattened silhouettes via denoise and amplified
+/// rain-grid noise via unsharp.
+///
+/// What survives:
+///
+///   * **Sampling** — `alpha_cutoff` for silhouette boundary,
+///     `luma_weights` for RGB→Y.
+///   * **Auto-levels** — opt-in via `auto_levels_enabled`. Defensible
+///     for low-contrast / clustered-histogram inputs (canonically
+///     called out as appropriate for "images with clustered
+///     intensity values"); harmful for already-high-contrast
+///     overlays. Default off so the engine is passthrough.
+///   * **Glyph emission** — `brightness_floor`, `brightness_scale`,
+///     `header_brightness_scale` control how bright the emitted
+///     overlay glyphs render against the rain. Typography, not
+///     image processing.
+///   * **Intro layer** — `intro_density_multiplier_x`,
+///     `intro_glyph_scale`, `intro_layer_brightness_scale` shape the
+///     sub-column ghost-glyph layer.
 #[derive(Debug, Clone, Copy)]
 struct OverlayTuning {
-    // CONFIG_UI: `overlay_alpha_cutoff`
+    // Sampling
     alpha_cutoff: f32,
-    // CONFIG_UI: `overlay_luma_weights`
     luma_weights: (f32, f32, f32),
-    // CONFIG_UI: `overlay_luma_gamma`
-    gamma: f32,
-    // CONFIG_UI: `overlay_contrast`
-    contrast: f32,
-    // CONFIG_UI: `overlay_auto_levels_low_percentile`
-    levels_low_percentile: f32,
-    // CONFIG_UI: `overlay_auto_levels_high_percentile`
-    levels_high_percentile: f32,
-    // CONFIG_UI: `overlay_brightness_floor`
-    brightness_floor: f32,
-    // CONFIG_UI: `overlay_brightness_scale`
-    brightness_scale: f32,
-    // CONFIG_UI: `overlay_header_brightness_scale`
-    header_brightness_scale: f32,
-    // CONFIG_UI: `overlay_intro_density_multiplier_x`
-    intro_density_multiplier_x: f32,
-    // CONFIG_UI: `overlay_intro_glyph_scale`
-    intro_glyph_scale: f32,
-    // CONFIG_UI: `overlay_intro_layer_brightness_scale`
-    intro_layer_brightness_scale: f32,
-    // CONFIG_UI: `overlay_denoise_mode`
-    denoise_mode: OverlayDenoiseMode,
-    // CONFIG_UI: `overlay_denoise_strength`
-    denoise_strength: f32,
-    // CONFIG_UI: `overlay_clahe_enabled`
-    clahe_enabled: bool,
-    // CONFIG_UI: `overlay_clahe_clip_limit`
-    clahe_clip_limit: f32,
-    // CONFIG_UI: `overlay_clahe_tile_grid`
-    clahe_tile_grid: (u32, u32),
-    // CONFIG_UI: `overlay_unsharp_enabled`
-    unsharp_enabled: bool,
-    // CONFIG_UI: `overlay_unsharp_amount`
-    unsharp_amount: f32,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-enum OverlayDenoiseMode {
-    #[serde(rename = "none")]
-    None,
-    #[serde(rename = "median")]
-    Median,
-    #[serde(rename = "bilateral")]
-    Bilateral,
+    // Auto-levels (opt-in)
+    auto_levels_enabled: bool,
+    levels_low_percentile: f32,
+    levels_high_percentile: f32,
+
+    // Glyph emission
+    brightness_floor: f32,
+    brightness_scale: f32,
+    header_brightness_scale: f32,
+
+    // Intro layer typography
+    intro_density_multiplier_x: f32,
+    intro_glyph_scale: f32,
+    intro_layer_brightness_scale: f32,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct OverlayTuningConfig {
     alpha_cutoff: Option<f32>,
     luma_weights: Option<[f32; 3]>,
-    gamma: Option<f32>,
-    contrast: Option<f32>,
+    auto_levels_enabled: Option<bool>,
     levels_low_percentile: Option<f32>,
     levels_high_percentile: Option<f32>,
     brightness_floor: Option<f32>,
@@ -120,13 +116,6 @@ struct OverlayTuningConfig {
     intro_density_multiplier_x: Option<f32>,
     intro_glyph_scale: Option<f32>,
     intro_layer_brightness_scale: Option<f32>,
-    denoise_mode: Option<OverlayDenoiseMode>,
-    denoise_strength: Option<f32>,
-    clahe_enabled: Option<bool>,
-    clahe_clip_limit: Option<f32>,
-    clahe_tile_grid: Option<[u32; 2]>,
-    unsharp_enabled: Option<bool>,
-    unsharp_amount: Option<f32>,
 }
 
 impl OverlayTuning {
@@ -137,11 +126,8 @@ impl OverlayTuning {
         if let Some([r, g, b]) = config.luma_weights {
             self.luma_weights = (r, g, b);
         }
-        if let Some(value) = config.gamma {
-            self.gamma = value;
-        }
-        if let Some(value) = config.contrast {
-            self.contrast = value;
+        if let Some(value) = config.auto_levels_enabled {
+            self.auto_levels_enabled = value;
         }
         if let Some(value) = config.levels_low_percentile {
             self.levels_low_percentile = value;
@@ -167,27 +153,6 @@ impl OverlayTuning {
         if let Some(value) = config.intro_layer_brightness_scale {
             self.intro_layer_brightness_scale = value;
         }
-        if let Some(value) = config.denoise_mode {
-            self.denoise_mode = value;
-        }
-        if let Some(value) = config.denoise_strength {
-            self.denoise_strength = value;
-        }
-        if let Some(value) = config.clahe_enabled {
-            self.clahe_enabled = value;
-        }
-        if let Some(value) = config.clahe_clip_limit {
-            self.clahe_clip_limit = value;
-        }
-        if let Some([x, y]) = config.clahe_tile_grid {
-            self.clahe_tile_grid = (x, y);
-        }
-        if let Some(value) = config.unsharp_enabled {
-            self.unsharp_enabled = value;
-        }
-        if let Some(value) = config.unsharp_amount {
-            self.unsharp_amount = value;
-        }
 
         self.sanitize()
     }
@@ -199,8 +164,6 @@ impl OverlayTuning {
         if !sum.is_finite() || sum <= f32::EPSILON {
             self.luma_weights = (0.2126, 0.7152, 0.0722);
         }
-        self.gamma = self.gamma.clamp(0.2, 3.0);
-        self.contrast = self.contrast.clamp(0.2, 3.0);
         self.levels_low_percentile = self.levels_low_percentile.clamp(0.0, 1.0);
         self.levels_high_percentile = self.levels_high_percentile.clamp(0.0, 1.0);
         if self.levels_low_percentile >= self.levels_high_percentile {
@@ -213,13 +176,6 @@ impl OverlayTuning {
         self.intro_density_multiplier_x = self.intro_density_multiplier_x.clamp(1.0, 4.0);
         self.intro_glyph_scale = self.intro_glyph_scale.clamp(0.25, 1.0);
         self.intro_layer_brightness_scale = self.intro_layer_brightness_scale.clamp(0.0, 2.0);
-        self.denoise_strength = self.denoise_strength.clamp(0.0, 1.0);
-        self.clahe_clip_limit = self.clahe_clip_limit.clamp(0.5, 8.0);
-        self.clahe_tile_grid = (
-            self.clahe_tile_grid.0.clamp(1, 32),
-            self.clahe_tile_grid.1.clamp(1, 32),
-        );
-        self.unsharp_amount = self.unsharp_amount.clamp(0.0, 2.0);
         self
     }
 }
@@ -229,8 +185,7 @@ impl Default for OverlayTuning {
         Self {
             alpha_cutoff: 0.03,
             luma_weights: (0.18, 0.74, 0.08),
-            gamma: 1.0,
-            contrast: 1.0,
+            auto_levels_enabled: false,
             levels_low_percentile: 0.05,
             levels_high_percentile: 0.95,
             brightness_floor: 0.10,
@@ -239,13 +194,6 @@ impl Default for OverlayTuning {
             intro_density_multiplier_x: 2.0,
             intro_glyph_scale: 0.5,
             intro_layer_brightness_scale: 1.0,
-            denoise_mode: OverlayDenoiseMode::None,
-            denoise_strength: 0.25,
-            clahe_enabled: false,
-            clahe_clip_limit: 2.0,
-            clahe_tile_grid: (8, 8),
-            unsharp_enabled: false,
-            unsharp_amount: 0.35,
         }
     }
 }

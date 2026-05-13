@@ -870,7 +870,6 @@ mod tests {
     use super::renderer;
     use super::storage;
     use super::CoreRuntime;
-    use super::OverlayDenoiseMode;
     use super::OverlayTuning;
     use super::OverlayTuningConfig;
     use super::RainColumn;
@@ -1084,44 +1083,40 @@ mod tests {
     }
 
     #[test]
-    fn overlay_tuning_defaults_keep_neutral_shaping() {
+    fn overlay_tuning_defaults_to_passthrough() {
+        // V2: filter fields are gone, auto_levels defaults off.
         let tuning = OverlayTuning::default();
-        assert!((tuning.gamma - 1.0).abs() < f32::EPSILON);
-        assert!((tuning.contrast - 1.0).abs() < f32::EPSILON);
-        assert_eq!(tuning.denoise_mode, OverlayDenoiseMode::None);
-        assert!(!tuning.clahe_enabled);
-        assert!(!tuning.unsharp_enabled);
+        assert!(!tuning.auto_levels_enabled);
+        assert!((tuning.alpha_cutoff - 0.03).abs() < f32::EPSILON);
         assert!((tuning.intro_glyph_scale - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn overlay_tuning_parses_extended_fields() {
+    fn overlay_tuning_parses_typography_fields() {
+        // Filter-related JSON fields (denoise_mode, clahe_*, unsharp_*,
+        // gamma, contrast) parse-skip silently — serde defaults to
+        // ignore unknown fields. Confirm the surviving typography
+        // knobs still flow through.
         let config = serde_json::from_str::<OverlayTuningConfig>(
             r#"{
+                "auto_levels_enabled": true,
+                "levels_low_percentile": 0.1,
+                "levels_high_percentile": 0.9,
                 "intro_density_multiplier_x": 3.0,
                 "intro_glyph_scale": 0.4,
                 "intro_layer_brightness_scale": 1.35,
                 "denoise_mode": "median",
-                "denoise_strength": 0.6,
-                "clahe_enabled": true,
-                "clahe_clip_limit": 3.2,
-                "clahe_tile_grid": [5, 7],
-                "unsharp_enabled": true,
-                "unsharp_amount": 0.75
+                "clahe_enabled": true
             }"#,
         )
         .expect("overlay config should parse");
         let tuning = OverlayTuning::default().with_overrides(config);
+        assert!(tuning.auto_levels_enabled);
+        assert!((tuning.levels_low_percentile - 0.1).abs() < f32::EPSILON);
+        assert!((tuning.levels_high_percentile - 0.9).abs() < f32::EPSILON);
         assert!((tuning.intro_density_multiplier_x - 3.0).abs() < f32::EPSILON);
         assert!((tuning.intro_glyph_scale - 0.4).abs() < f32::EPSILON);
         assert!((tuning.intro_layer_brightness_scale - 1.35).abs() < f32::EPSILON);
-        assert_eq!(tuning.denoise_mode, OverlayDenoiseMode::Median);
-        assert!((tuning.denoise_strength - 0.6).abs() < f32::EPSILON);
-        assert!(tuning.clahe_enabled);
-        assert!((tuning.clahe_clip_limit - 3.2).abs() < f32::EPSILON);
-        assert_eq!(tuning.clahe_tile_grid, (5, 7));
-        assert!(tuning.unsharp_enabled);
-        assert!((tuning.unsharp_amount - 0.75).abs() < f32::EPSILON);
     }
 
     fn unique_test_file_name(prefix: &str) -> PathBuf {

@@ -72,25 +72,28 @@ impl CoreRuntime {
                 sampled_luma[index] = luminance;
             }
         }
-        Self::preprocess_overlay_luminance(
-            &mut sampled_luma,
-            &sampled_alpha,
-            fit_cols,
-            fit_rows,
-            tuning,
-        );
 
-        let mut valid_luma = Vec::with_capacity(sample_len / 2);
-        for index in 0..sample_len {
-            if sampled_alpha[index] >= tuning.alpha_cutoff {
-                valid_luma.push(sampled_luma[index]);
+        // V2: no preprocessing pipeline. Per the research synthesis,
+        // canonical ASCII-conversion tools default to passthrough;
+        // only `auto_levels` (a contrast-stretch) is exposed, and
+        // only as a user opt-in. Compute the levels bounds once for
+        // each grid (header + dense intro), but apply them only if
+        // tuning.auto_levels_enabled.
+        let (levels_low, levels_high) = if tuning.auto_levels_enabled {
+            let mut valid_luma = Vec::with_capacity(sample_len / 2);
+            for index in 0..sample_len {
+                if sampled_alpha[index] >= tuning.alpha_cutoff {
+                    valid_luma.push(sampled_luma[index]);
+                }
             }
-        }
-        let (levels_low, levels_high) = Self::auto_levels(
-            &mut valid_luma,
-            tuning.levels_low_percentile,
-            tuning.levels_high_percentile,
-        );
+            Self::auto_levels(
+                &mut valid_luma,
+                tuning.levels_low_percentile,
+                tuning.levels_high_percentile,
+            )
+        } else {
+            (0.0, 1.0)
+        };
 
         let intro_density_columns = tuning.intro_density_multiplier_x.round().max(1.0) as u32;
         let dense_fit_cols = fit_cols.saturating_mul(intro_density_columns).max(1);
@@ -111,24 +114,21 @@ impl CoreRuntime {
                 dense_luma[index] = luminance;
             }
         }
-        Self::preprocess_overlay_luminance(
-            &mut dense_luma,
-            &dense_alpha,
-            dense_fit_cols,
-            fit_rows,
-            tuning,
-        );
-        let mut dense_valid_luma = Vec::with_capacity(dense_sample_len / 2);
-        for index in 0..dense_sample_len {
-            if dense_alpha[index] >= tuning.alpha_cutoff {
-                dense_valid_luma.push(dense_luma[index]);
+        let (dense_levels_low, dense_levels_high) = if tuning.auto_levels_enabled {
+            let mut dense_valid_luma = Vec::with_capacity(dense_sample_len / 2);
+            for index in 0..dense_sample_len {
+                if dense_alpha[index] >= tuning.alpha_cutoff {
+                    dense_valid_luma.push(dense_luma[index]);
+                }
             }
-        }
-        let (dense_levels_low, dense_levels_high) = Self::auto_levels(
-            &mut dense_valid_luma,
-            tuning.levels_low_percentile,
-            tuning.levels_high_percentile,
-        );
+            Self::auto_levels(
+                &mut dense_valid_luma,
+                tuning.levels_low_percentile,
+                tuning.levels_high_percentile,
+            )
+        } else {
+            (0.0, 1.0)
+        };
 
         let mut slot_to_column = std::collections::HashMap::with_capacity(self.rain_columns.len());
         for (index, column) in self.rain_columns.iter().enumerate() {
@@ -148,10 +148,15 @@ impl CoreRuntime {
                 if alpha < tuning.alpha_cutoff {
                     continue;
                 }
-                let leveled = Self::remap_level(raw_luminance, levels_low, levels_high);
-                let gamma_shaped = leveled.powf(tuning.gamma.clamp(0.2, 3.0));
-                let contrasted = (((gamma_shaped - 0.5) * tuning.contrast) + 0.5).clamp(0.0, 1.0);
-                let glyph_index = Self::overlay_glyph_index_for_luminance(contrasted, &glyph_lookup);
+                // V2: gamma/contrast stages dropped. Apply optional
+                // auto-levels remap if enabled; otherwise raw luminance
+                // goes straight to glyph mapping.
+                let shaped = if tuning.auto_levels_enabled {
+                    Self::remap_level(raw_luminance, levels_low, levels_high)
+                } else {
+                    raw_luminance.clamp(0.0, 1.0)
+                };
+                let glyph_index = Self::overlay_glyph_index_for_luminance(shaped, &glyph_lookup);
                 let Some(glyph_index) = glyph_index else {
                     continue;
                 };
@@ -185,7 +190,7 @@ impl CoreRuntime {
                     else {
                         continue;
                     };
-                    let brightness = (tuning.brightness_floor + contrasted * alpha * tuning.brightness_scale)
+                    let brightness = (tuning.brightness_floor + shaped * alpha * tuning.brightness_scale)
                         .clamp(tuning.brightness_floor, 1.0);
                     per_column_targets
                         .entry(column_index)
@@ -205,18 +210,18 @@ impl CoreRuntime {
                         if dense_alpha_value < tuning.alpha_cutoff {
                             continue;
                         }
-                        let dense_leveled =
-                            Self::remap_level(dense_luma[dense_index], dense_levels_low, dense_levels_high);
-                        let dense_gamma = dense_leveled.powf(tuning.gamma.clamp(0.2, 3.0));
-                        let dense_contrasted =
-                            (((dense_gamma - 0.5) * tuning.contrast) + 0.5).clamp(0.0, 1.0);
+                        let dense_shaped = if tuning.auto_levels_enabled {
+                            Self::remap_level(dense_luma[dense_index], dense_levels_low, dense_levels_high)
+                        } else {
+                            dense_luma[dense_index].clamp(0.0, 1.0)
+                        };
                         let Some(dense_glyph_index) =
-                            Self::overlay_glyph_index_for_luminance(dense_contrasted, &glyph_lookup)
+                            Self::overlay_glyph_index_for_luminance(dense_shaped, &glyph_lookup)
                         else {
                             continue;
                         };
                         let dense_brightness = (tuning.brightness_floor
-                            + dense_contrasted * dense_alpha_value * tuning.brightness_scale)
+                            + dense_shaped * dense_alpha_value * tuning.brightness_scale)
                             * tuning.intro_layer_brightness_scale;
                         let dense_brightness =
                             dense_brightness.clamp(tuning.brightness_floor, 1.0);
