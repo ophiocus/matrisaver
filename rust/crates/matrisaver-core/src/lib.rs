@@ -476,19 +476,22 @@ pub mod storage {
     use std::path::{Path, PathBuf};
 
     pub fn default_settings_path() -> PathBuf {
+        // Override at the top of the chain so power-users and tests
+        // can pin the file location explicitly.
         if let Some(path) = std::env::var_os("MATRISAVER_SETTINGS_PATH") {
             return PathBuf::from(path);
         }
-        if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-            return PathBuf::from(config_home)
-                .join("matrisaver")
-                .join("settings.json");
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home)
-                .join(".config")
-                .join("matrisaver")
-                .join("settings.json");
+        // OS-native config directory:
+        //   Windows : %APPDATA% (Roaming)
+        //   Linux   : $XDG_CONFIG_HOME or ~/.config
+        //   macOS   : ~/Library/Application Support
+        // The previous implementation was hand-rolled XDG-only and on
+        // Windows fell through to a bare relative "settings.json"
+        // when launched without $HOME (e.g. Display Properties →
+        // winlogon parent), which tried to write into
+        // C:\Windows\System32\ and silently failed.
+        if let Some(base) = dirs::config_dir() {
+            return base.join("matrisaver").join("settings.json");
         }
         PathBuf::from("settings.json")
     }

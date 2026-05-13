@@ -13,3 +13,7 @@ pollster = "0.4"
 bytemuck = { version = "1.21", features = ["derive"] }
 ab_glyph = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "tga", "tiff", "webp"] }
+# Cross-platform settings.json location. Returns the OS-native config
+# dir (%APPDATA% on Windows, $XDG_CONFIG_HOME/~/.config on Linux,
+# ~/Library/Application Support on macOS).
+dirs = "5"
