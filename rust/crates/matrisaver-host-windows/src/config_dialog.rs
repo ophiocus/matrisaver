@@ -24,6 +24,7 @@
 use eframe::egui;
 use matrisaver_core::config::{variant_by_key, GlowQuality, Settings, VARIANTS};
 use matrisaver_core::storage;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -58,7 +59,9 @@ pub fn open() -> eframe::Result<()> {
 enum UpdateStatus {
     Checking,
     UpToDate,
-    Available { latest: String },
+    Available { latest: String, msi_url: String },
+    Downloading,
+    DownloadFailed { reason: String },
     Failed { reason: String },
 }
 
@@ -79,6 +82,11 @@ struct ConfigApp {
     /// Background update-check pipe; drained each frame.
     update_rx: Option<mpsc::Receiver<UpdateStatus>>,
     update_status: UpdateStatus,
+    /// In-flight install download; drained each frame. `Ok` means the
+    /// MSI is staged at the returned path and an elevated msiexec has
+    /// been spawned — we self-exit on success so the new MSI can
+    /// overwrite our own .scr in System32.
+    download_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     /// Transient banner shown in the Advanced section.
     status: Option<StatusMessage>,
 }
@@ -89,7 +97,9 @@ impl ConfigApp {
         std::thread::spawn(move || {
             let status = match update_check::check(None) {
                 UpdateCheckResult::UpToDate { .. } => UpdateStatus::UpToDate,
-                UpdateCheckResult::Available { latest, .. } => UpdateStatus::Available { latest },
+                UpdateCheckResult::Available {
+                    latest, msi_url, ..
+                } => UpdateStatus::Available { latest, msi_url },
                 UpdateCheckResult::Failed(reason) => UpdateStatus::Failed { reason },
             };
             let _ = tx.send(status);
@@ -100,6 +110,7 @@ impl ConfigApp {
             on_disk: settings,
             update_rx: Some(rx),
             update_status: UpdateStatus::Checking,
+            download_rx: None,
             status: None,
         }
     }
@@ -128,12 +139,45 @@ impl ConfigApp {
             }
         }
     }
+
+    fn drain_download(&mut self) {
+        let Some(rx) = self.download_rx.as_ref() else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        match result {
+            Ok(_path) => {
+                // The elevated msiexec is now running on its own. We
+                // must exit so it can overwrite C:\Windows\System32\
+                // matrisaver.scr — the file backing the very process
+                // we're in. The user sees msiexec's /passive progress
+                // dialog hand off cleanly.
+                std::process::exit(0);
+            }
+            Err(reason) => {
+                self.update_status = UpdateStatus::DownloadFailed { reason };
+                self.download_rx = None;
+            }
+        }
+    }
+
+    fn handle_install(&mut self, msi_url: String, version: String) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(download_and_install(&msi_url, &version));
+        });
+        self.download_rx = Some(rx);
+        self.update_status = UpdateStatus::Downloading;
+    }
 }
 
 impl eframe::App for ConfigApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_status();
         self.drain_update_check();
+        self.drain_download();
 
         // Repaint shortly so the status banner expires and the update
         // check polling stays live without blocking on input.
@@ -313,18 +357,32 @@ impl ConfigApp {
         ui.add_space(4.0);
     }
 
-    fn render_update_status(&self, ui: &mut egui::Ui) {
-        match &self.update_status {
+    fn render_update_status(&mut self, ui: &mut egui::Ui) {
+        // Clone the status to release the borrow on `self` before the
+        // match arms (the Available arm needs &mut self for handle_install).
+        let status = self.update_status.clone();
+        match status {
             UpdateStatus::Checking => {
                 ui.weak("Checking for updates…");
             }
             UpdateStatus::UpToDate => {
                 ui.colored_label(egui::Color32::from_rgb(120, 200, 120), "Up to date");
             }
-            UpdateStatus::Available { latest } => {
+            UpdateStatus::Available { latest, msi_url } => {
+                let label = format!("v{latest} available — Install");
+                let button = egui::Button::new(label).fill(egui::Color32::from_rgb(40, 80, 30));
+                if ui.add(button).clicked() {
+                    self.handle_install(msi_url, latest);
+                }
+            }
+            UpdateStatus::Downloading => {
+                ui.weak("Downloading update…");
+                ui.spinner();
+            }
+            UpdateStatus::DownloadFailed { reason } => {
                 ui.colored_label(
-                    egui::Color32::from_rgb(230, 200, 80),
-                    format!("v{latest} available"),
+                    egui::Color32::LIGHT_RED,
+                    format!("Install failed: {reason}"),
                 );
             }
             UpdateStatus::Failed { reason } => {
@@ -418,6 +476,46 @@ impl ConfigApp {
             ),
         }
     }
+}
+
+/// Download the MSI from `url` to `%TEMP%\matrisaver-<version>.msi`,
+/// then spawn an elevated `msiexec /i … /passive /norestart` via
+/// PowerShell's `Start-Process -Verb RunAs`. Returns the staged path
+/// on success; caller is responsible for exiting the current process
+/// so msiexec can replace our own .scr in System32.
+///
+/// Modeled on I:\Skeleton\src\git_update.rs::download_and_install.
+fn download_and_install(url: &str, version: &str) -> Result<PathBuf, String> {
+    let user_agent = format!("MatriSaver/{}", env!("APP_VERSION"));
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(user_agent)
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|err| format!("HTTP client: {err}"))?;
+
+    let bytes = client
+        .get(url)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.bytes())
+        .map_err(|err| format!("download: {err}"))?;
+
+    let path = std::env::temp_dir().join(format!("matrisaver-{version}.msi"));
+    std::fs::write(&path, &bytes).map_err(|err| format!("write MSI: {err}"))?;
+
+    let msi_arg = path.to_string_lossy().to_string();
+    std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "Start-Process msiexec -ArgumentList '/i \"{msi_arg}\" /passive /norestart' -Verb RunAs"
+            ),
+        ])
+        .spawn()
+        .map_err(|err| format!("launch installer: {err}"))?;
+
+    Ok(path)
 }
 
 fn glow_quality_label(q: GlowQuality) -> &'static str {
