@@ -14,7 +14,9 @@ impl CoreRuntime {
         if image_paths.is_empty() {
             return false;
         }
-        let image_path = &image_paths[self.overlay_image_cursor % image_paths.len()];
+        let (image_path, write_ascii) =
+            image_paths[self.overlay_image_cursor % image_paths.len()].clone();
+        let image_path = image_path.as_path();
         self.overlay_image_cursor = self.overlay_image_cursor.wrapping_add(1);
         let image_name = image_path
             .file_name()
@@ -288,6 +290,27 @@ impl CoreRuntime {
                 next_target_index: 0,
                 targets: target_list,
             });
+        }
+
+        // Side-effect snapshot for the user: write the rendered glyph
+        // grid as plain text next to the source image. Skipped
+        // silently when the directory's write probe failed (cached
+        // per session) or when the source didn't opt in.
+        if write_ascii {
+            let auto_levels = if tuning.auto_levels_enabled {
+                Some((levels_low, levels_high))
+            } else {
+                None
+            };
+            let grid_text = Self::render_overlay_grid_text(
+                &sampled_alpha,
+                &sampled_luma,
+                fit_cols,
+                fit_rows,
+                tuning.alpha_cutoff,
+                auto_levels,
+            );
+            self.write_overlay_ascii_alongside(image_path, &grid_text);
         }
 
         if !self.overlay_headers.is_empty() {

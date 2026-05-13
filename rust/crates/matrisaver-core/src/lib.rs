@@ -265,6 +265,27 @@ pub mod config {
     }
 
     /// Persisted runtime settings shared across host integrations.
+    /// One user-supplied or install-shipped directory of overlay
+    /// images. Multiple of these compose the lookup chain; the engine
+    /// walks them in declaration order and dedupes by filename.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct OverlaySource {
+        pub path: std::path::PathBuf,
+        #[serde(default = "default_true")]
+        pub enabled: bool,
+        /// When true and the directory is writable, the engine writes
+        /// the per-image ASCII glyph grid alongside each source image
+        /// as `<image>.<extension>.ascii.txt` after each injection.
+        /// Idempotent permission probe per session — silently skipped
+        /// on read-only directories.
+        #[serde(default)]
+        pub write_ascii_alongside: bool,
+    }
+
+    fn default_true() -> bool {
+        true
+    }
+
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Settings {
         pub variant: String,
@@ -275,6 +296,19 @@ pub mod config {
         pub performance_mode: bool,
         pub multi_monitor: bool,
         pub char_size: u16,
+        /// Ordered list of overlay-image directories. Earlier entries
+        /// take priority over later ones when filenames collide. An
+        /// empty list falls back to the legacy resolution chain
+        /// (`MATRISAVER_OVERLAY_DIR` env var, ancestor walks of the
+        /// exe / cwd, then `CARGO_MANIFEST_DIR` at compile time).
+        #[serde(default)]
+        pub overlay_directories: Vec<OverlaySource>,
+        /// Opt-in contrast-stretch before ASCII glyph mapping.
+        /// Defensible for low-contrast input photos; off by default
+        /// (matrisaver V2 defaults to passthrough per canonical
+        /// ASCII-conversion practice).
+        #[serde(default)]
+        pub overlay_auto_levels: bool,
     }
 
     impl Default for Settings {
@@ -287,6 +321,8 @@ pub mod config {
                 performance_mode: false,
                 multi_monitor: true,
                 char_size: 22,
+                overlay_directories: Vec::new(),
+                overlay_auto_levels: false,
             }
         }
     }
@@ -301,6 +337,11 @@ pub mod config {
                 self.variant = "original".to_owned();
             }
             self.char_size = self.char_size.clamp(8, 96);
+            // Drop empty / dotfile / clearly bogus paths; keep order.
+            self.overlay_directories.retain(|src| {
+                !src.path.as_os_str().is_empty()
+                    && src.path.file_name().is_some_and(|n| !n.is_empty())
+            });
             self
         }
     }
@@ -623,6 +664,11 @@ pub struct CoreRuntime {
     overlay_intro_glyphs: Vec<OverlayIntroGlyph>,
     overlay_intro_mode: OverlayIntroMode,
     overlay_tuning: OverlayTuning,
+    /// Idempotent per-session cache of overlay-source writability.
+    /// `true` = the writer probe succeeded once; `false` = probe
+    /// failed, skip future writes silently. Per the v0.2.0 contract:
+    /// no error surfacing, no retries.
+    overlay_dir_writable: std::collections::HashMap<std::path::PathBuf, bool>,
 }
 
 impl CoreRuntime {
@@ -661,6 +707,7 @@ impl CoreRuntime {
             overlay_intro_glyphs: Vec::new(),
             overlay_intro_mode: OverlayIntroMode::AllAtOnce,
             overlay_tuning: OverlayTuning::default(),
+            overlay_dir_writable: std::collections::HashMap::new(),
         }
     }
 
@@ -930,6 +977,12 @@ mod tests {
             performance_mode: true,
             multi_monitor: false,
             char_size: 31,
+            overlay_directories: vec![config::OverlaySource {
+                path: std::path::PathBuf::from("/tmp/my-overlays"),
+                enabled: true,
+                write_ascii_alongside: true,
+            }],
+            overlay_auto_levels: true,
         };
         storage::save_settings(&settings, Some(&path)).expect("save settings failed");
 
