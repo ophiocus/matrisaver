@@ -62,6 +62,28 @@ Useful runtime flags:
 - WSL launcher: `prototype/bin/run_wsl_windows.ps1`
 - Native Windows multi-monitor launcher: `prototype/bin/run_windows_multi.ps1`
 
+## After installing the MSI — how to open Settings
+
+The Windows-blessed path to a screensaver's configuration is **Display
+Properties → Screen Saver Settings**, not a direct invocation of the
+`.scr`. Two equivalent ways to get there:
+
+1. **Start Menu → MatriSaver → "MatriSaver Settings"** (created by the
+   MSI; opt-out checkbox on the install Customize page if you don't
+   want it).
+2. **Win+R → `control desk.cpl,,@screensaver`** → pick MatriSaver from
+   the dropdown → **Settings…**
+
+Either one opens the in-app egui settings dialog with variant pickers,
+glow quality, glyph size, multi-monitor toggle, Import/Export of
+`settings.json`, and the one-click "Install update" button when a
+newer release is available.
+
+Direct `.scr` invocation from PowerShell will hit Windows'
+`scrfile`-association handler, which always routes to screensaver
+mode (`%1 /S`) — `/c` gets dropped. There's no clean shell incantation
+around that; use one of the two methods above.
+
 ## Documentation
 
 Formal documentation tree: [`docs/README.md`](docs/README.md)

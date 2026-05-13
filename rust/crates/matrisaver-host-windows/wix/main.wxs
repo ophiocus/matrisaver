@@ -104,6 +104,51 @@
                         KeyPath='yes'/>
                 </Component>
             </Directory>
+
+            <!--
+              Start Menu shortcut. The Target is rundll32.exe (always
+              on PATH) invoking shell32.dll,Control_RunDLL with the
+              desk.cpl `@screensaver` page argument — that is the
+              Windows-blessed entry point to the Screen Saver settings
+              page. MatriSaver is auto-listed in the dropdown there
+              because System32\matrisaver.scr is picked up by the
+              Display Properties scan; clicking the page's
+              "Settings…" button then invokes our /c handler properly
+              (Display Properties passes /c:<HWND> the way the WinAPI
+              expects).
+
+              The shortcut is in its own Feature so the customize
+              page can show an opt-in checkbox. Default is on
+              (Level='1', Absent='allow'). An uncheck makes the user
+              fully responsible for remembering how to open the
+              Screen Saver settings page on their own.
+            -->
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='AppShortcutFolder' Name='MatriSaver'>
+                    <Component Id='StartMenuShortcut' Guid='D321BBC6-E019-41D9-8545-25554D1C83D1'>
+                        <Shortcut Id='MatrisaverSettingsShortcut'
+                                  Name='MatriSaver Settings'
+                                  Description='Open the Windows Screen Saver settings page'
+                                  Target='[$(var.PlatformSystemFolder)]rundll32.exe'
+                                  Arguments='shell32.dll,Control_RunDLL desk.cpl,,@screensaver'
+                                  WorkingDirectory='$(var.PlatformSystemFolder)'/>
+                        <RemoveFolder Id='RemoveAppShortcutFolder'
+                                      Directory='AppShortcutFolder'
+                                      On='uninstall'/>
+                        <!--
+                          A non-file Component needs a KeyPath; per-user
+                          registry value is the canonical pattern for
+                          shortcut-only components.
+                        -->
+                        <RegistryValue Root='HKCU'
+                                       Key='Software\ophiocus\MatriSaver'
+                                       Name='StartMenuShortcut'
+                                       Type='integer'
+                                       Value='1'
+                                       KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
         </Directory>
 
         <Feature
@@ -117,22 +162,55 @@
             <ComponentRef Id='ScreensaverBinary'/>
         </Feature>
 
+        <Feature
+            Id='StartMenuShortcutFeature'
+            Title='Start Menu shortcut'
+            Description='Adds a "MatriSaver Settings" shortcut under Start → MatriSaver that opens the Screen Saver settings page directly.'
+            Level='1'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='allow'>
+            <ComponentRef Id='StartMenuShortcut'/>
+        </Feature>
+
         <Property Id='ARPHELPLINK' Value='https://github.com/ophiocus/matrisaver'/>
         <Property Id='ARPURLINFOABOUT' Value='https://github.com/ophiocus/matrisaver'/>
 
         <!--
-          No <UI> block on purpose. A screensaver install is a one-file
-          drop into System32 — a multi-page wizard would be friction.
-          Windows Installer falls back to its default lightweight
-          progress dialog when no <UI> is declared, which is exactly
-          what a one-click install wants.
-
-          The earlier WixUI_Minimal attempt hit a hard dependency on
-          WixUILicenseRtf at light.exe link-time (WelcomeEulaDlg
-          hardcoded), and the CWD light runs in on the CI runner did
-          not match the relative `wix\License.rtf` value. Dropping the
-          UI sidesteps that entirely.
+          ExitDialog "launch now" affordance — same flavor as a
+          "launch app now" / "open readme" checkbox most installers
+          show on the final page. WIXUI_EXITDIALOGOPTIONALCHECKBOX
+          controls the default check state (1 = checked); the text
+          property is the checkbox label. The DoAction Publish below
+          fires LaunchScreensaverSettings if the box is checked AND
+          we just finished a fresh install (not uninstall).
         -->
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOX' Value='1'/>
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT'
+                  Value='Open Screen Saver Settings now'/>
+
+        <CustomAction Id='LaunchScreensaverSettings'
+                      ExeCommand='rundll32.exe shell32.dll,Control_RunDLL desk.cpl,,@screensaver'
+                      Directory='$(var.PlatformSystemFolder)'
+                      Return='asyncNoWait'
+                      Impersonate='yes'/>
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree'/>
+
+            <!--
+              Skip the LicenseAgreementDlg path that WixUI_FeatureTree
+              defaults into (avoids the WixUILicenseRtf / License.rtf
+              lookup that bit us in v0.1.0). Welcome → Customize
+              directly, and Back from Customize returns to Welcome.
+              Mirrors the working pattern in I:\Skeleton\wix\main.wxs.
+            -->
+            <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>
+            <Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
+
+            <!-- Fire the launch-now custom action on Finish, only on fresh installs. -->
+            <Publish Dialog='ExitDialog' Control='Finish' Event='DoAction' Value='LaunchScreensaverSettings'>WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+        </UI>
 
     </Product>
 
