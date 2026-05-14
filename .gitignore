@@ -1,9 +1,3 @@
-# Python prototype
-prototype/.venv/
-prototype/**/__pycache__/
-prototype/**/*.pyc
-prototype/.python-version
-
 # Local Rust build artifacts
 rust/target/
 rust/settings.json
@@ -17,9 +11,10 @@ rust/settings.json
 # Overlay assets are local-only by default
 assets/overlays/*
 !assets/overlays/README.md
-!assets/overlays/use/
-assets/overlays/use/*
-!assets/overlays/use/README.md
+# neo.png is the tracked default overlay — counter-ignored so it
+# survives clones and is available to dev builds via the ancestor-walk
+# resolution. Other images in this directory stay local-only.
+!assets/overlays/neo.png
 
 # Source-resolution branding assets (4K PNG / 6K JPG from OpenArt) stay
 # local; only the downscaled web variants in assets/branding/ are tracked.
