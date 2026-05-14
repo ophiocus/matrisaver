@@ -8,17 +8,26 @@ rust/settings.json
 *.msi
 *.pdb
 
-# Overlay assets are local-only by default
+# Overlay assets. The directory is local-only by default; the
+# counter-ignored files below are the curated pack that ships in the
+# MSI and survives clones.
+#
+#   matrisaver-default.png — the project's own brand mark, owned
+#       outright, zero third-party rights.
+#   The other two — shipped by explicit owner decision. See the
+#       v0.2.1 commit message and CHANGELOG for the rights posture
+#       (stock-vector filename suggests a Shutterstock comp; the
+#       WhatsApp image is owner-supplied).
+#
+# neo.png is deliberately NOT counter-ignored: it is a film still,
+# © Warner Bros., and the MIT LICENSE cannot grant rights to it. It
+# stays local-only for dev testing. A WBD Clip & Still licensing
+# request would be the path to ever shipping it.
 assets/overlays/*
 !assets/overlays/README.md
-# matrisaver-default.png is the tracked, shippable default overlay —
-# a copy of the project's own brand mark (assets/branding/logo.png),
-# owned outright, zero third-party rights. Counter-ignored so it
-# survives clones and ships in the installer. Every other image in
-# this directory (film stills, stock vectors, WhatsApp photos, etc.)
-# stays local-only by design — those carry third-party copyright the
-# MIT license cannot grant.
 !assets/overlays/matrisaver-default.png
+!assets/overlays/WhatsApp Image 2026-02-15 at 10.38.31.jpeg
+!assets/overlays/stock-vector-all-seeing-eye-of-god-in-triangle-sacred-symbol-in-a-stylized-triangles-vector-monochrome-2189023981.jpg
 
 # Source-resolution branding assets (4K PNG / 6K JPG from OpenArt) stay
 # local; only the downscaled web variants in assets/branding/ are tracked.
