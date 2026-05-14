@@ -1,12 +1,13 @@
 # AGENTS.md
 
-Project: Matrix-inspired digital rain screensaver in Rust (production) with a legacy Python/Pygame prototype.
+Project: Matrix-inspired digital rain screensaver in Rust. Ships as a
+Windows `.scr` via MSI; Linux and macOS host stubs build but aren't
+yet packaged.
 
 Guidelines:
-- Rust workspace lives in `rust/`; this is the primary codebase.
-- Python prototype lives entirely in `prototype/` (code, venv, scripts). No Python files outside that directory.
+- Rust workspace lives in `rust/`; it is the entire codebase.
 - Store fonts or other binary assets in `assets/` and reference them by relative path.
-- If you add tests, place them in `tests/` and run from the Rust workspace.
+- If you add tests, place them in `tests/` (Rust integration) or alongside source as `#[cfg(test)] mod tests`.
 - In non-interactive shells, source Cargo env before Rust commands: `source "$HOME/.cargo/env"`.
 - Prefer `./check_rust.sh` for workspace Rust validation from repo root.
 - Platform workflow: Windows 11 is the base host OS, and this agent runs in WSL on that machine.

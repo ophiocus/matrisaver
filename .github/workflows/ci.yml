@@ -75,7 +75,6 @@ name: CI
       - '**.md'
       - 'docs/**'
       - 'assets/**'
-      - 'prototype/**'
       - '.gitignore'
       - 'run-screensaver.cmd'
   push:
@@ -84,7 +83,6 @@ name: CI
       - '**.md'
       - 'docs/**'
       - 'assets/**'
-      - 'prototype/**'
       - '.gitignore'
       - 'run-screensaver.cmd'
   workflow_dispatch:
