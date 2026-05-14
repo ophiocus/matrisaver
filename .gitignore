@@ -11,10 +11,14 @@ rust/settings.json
 # Overlay assets are local-only by default
 assets/overlays/*
 !assets/overlays/README.md
-# neo.png is the tracked default overlay — counter-ignored so it
-# survives clones and is available to dev builds via the ancestor-walk
-# resolution. Other images in this directory stay local-only.
-!assets/overlays/neo.png
+# matrisaver-default.png is the tracked, shippable default overlay —
+# a copy of the project's own brand mark (assets/branding/logo.png),
+# owned outright, zero third-party rights. Counter-ignored so it
+# survives clones and ships in the installer. Every other image in
+# this directory (film stills, stock vectors, WhatsApp photos, etc.)
+# stays local-only by design — those carry third-party copyright the
+# MIT license cannot grant.
+!assets/overlays/matrisaver-default.png
 
 # Source-resolution branding assets (4K PNG / 6K JPG from OpenArt) stay
 # local; only the downscaled web variants in assets/branding/ are tracked.
