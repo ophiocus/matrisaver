@@ -247,10 +247,7 @@ impl ConfigApp {
 
         // Toggles
         ui.checkbox(&mut self.working.multi_monitor, "Multi-monitor span");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.working.overlay_enabled, "Overlay images");
-            ui.weak("(assets not yet shipped in MSI install)");
-        });
+        ui.checkbox(&mut self.working.overlay_enabled, "Overlay images");
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.working.performance_mode, "Performance mode");
             ui.weak("(reduces effects on weak GPUs)");
@@ -275,10 +272,11 @@ impl ConfigApp {
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(
-                "Directories searched for overlay images, in priority order. \
-                 Earlier entries win on filename collisions. With no entries, \
-                 matrisaver falls back to the MATRISAVER_OVERLAY_DIR env var \
-                 or assets/overlays/ relative to the exe.",
+                "Extra directories searched for overlay images, in priority \
+                 order. Earlier entries win on filename collisions. The \
+                 MSI-installed pack at %ProgramData%\\matrisaver\\overlays\\ \
+                 is always searched as a baseline in addition to whatever \
+                 you list here — you don't need to add it.",
             )
             .weak()
             .small(),

@@ -35,60 +35,19 @@ impl CoreRuntime {
         None
     }
 
-    /// Each entry is `(image_path, write_ascii_alongside)`. The second
-    /// element rides along so the injector knows whether the source
-    /// directory opted into the ASCII-alongside writer. If
-    /// `Settings.overlay_directories` is non-empty, walk those in
-    /// priority order (deduped by filename, first match wins).
-    /// Otherwise fall back to the legacy single-directory resolution.
-    fn overlay_image_paths(&self) -> Vec<(std::path::PathBuf, bool)> {
-        let mut seen = std::collections::HashSet::<std::ffi::OsString>::new();
-        let mut paths = Vec::new();
-
-        if !self.settings.overlay_directories.is_empty() {
-            for source in &self.settings.overlay_directories {
-                if !source.enabled {
-                    continue;
-                }
-                let Ok(entries) = std::fs::read_dir(&source.path) else {
-                    continue;
-                };
-                let mut bucket: Vec<std::path::PathBuf> = entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| path.is_file())
-                    .filter(|path| {
-                        path.extension().and_then(|v| v.to_str()).is_some_and(|ext| {
-                            OVERLAY_IMAGE_EXTENSIONS
-                                .iter()
-                                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
-                        })
-                    })
-                    .collect();
-                bucket.sort();
-                for path in bucket {
-                    let key = path
-                        .file_name()
-                        .map(|n| n.to_os_string())
-                        .unwrap_or_default();
-                    if !seen.insert(key) {
-                        continue;
-                    }
-                    paths.push((path, source.write_ascii_alongside));
-                }
-            }
-            return paths;
-        }
-
-        // Legacy single-directory fallback (preserves behavior before
-        // Settings.overlay_directories existed).
-        let Some(overlay_dir) = self.resolve_overlay_directory() else {
-            return Vec::new();
+    /// Read one directory, append its image files (sorted, deduped by
+    /// filename against `seen`) to `out`, tagging each with
+    /// `write_ascii`. A missing/unreadable directory is a silent no-op.
+    fn collect_overlay_dir(
+        dir: &std::path::Path,
+        write_ascii: bool,
+        seen: &mut std::collections::HashSet<std::ffi::OsString>,
+        out: &mut Vec<(std::path::PathBuf, bool)>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
         };
-        let Ok(entries) = std::fs::read_dir(overlay_dir) else {
-            return Vec::new();
-        };
-        let mut legacy_paths: Vec<std::path::PathBuf> = entries
+        let mut bucket: Vec<std::path::PathBuf> = entries
             .flatten()
             .map(|entry| entry.path())
             .filter(|path| path.is_file())
@@ -100,8 +59,73 @@ impl CoreRuntime {
                 })
             })
             .collect();
-        legacy_paths.sort();
-        legacy_paths.into_iter().map(|p| (p, false)).collect()
+        bucket.sort();
+        for path in bucket {
+            let key = path
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
+            if !seen.insert(key) {
+                continue;
+            }
+            out.push((path, write_ascii));
+        }
+    }
+
+    /// The MSI installs the bundled overlay pack into
+    /// `%ProgramData%\matrisaver\overlays\`. `ProgramData` is reliably
+    /// set on Windows and absent elsewhere, so this naturally no-ops
+    /// on Linux/macOS.
+    fn programdata_overlays_dir() -> Option<std::path::PathBuf> {
+        let base = std::env::var_os("ProgramData")?;
+        let dir = std::path::PathBuf::from(base)
+            .join("matrisaver")
+            .join("overlays");
+        dir.is_dir().then_some(dir)
+    }
+
+    /// Resolved overlay image set, each entry `(image_path,
+    /// write_ascii_alongside)`. V2.1 layering, highest priority first:
+    ///
+    ///   1. `Settings.overlay_directories` — the user's explicit list,
+    ///      walked in declaration order. `write_ascii_alongside` rides
+    ///      from each `OverlaySource`.
+    ///   2. `%ProgramData%\matrisaver\overlays\` — the MSI-installed
+    ///      pack. Always searched as a baseline so a fresh install
+    ///      shows overlays without the user adding anything.
+    ///   3. Legacy `resolve_overlay_directory()` — only consulted when
+    ///      1 and 2 produced nothing (i.e. a dev build with no MSI
+    ///      pack and an empty settings list; the ancestor-walk finds
+    ///      the repo's `assets/overlays/`).
+    ///
+    /// Dedup is by filename, first-source-wins, so a user directory
+    /// shadows a same-named file in the shipped pack.
+    fn overlay_image_paths(&self) -> Vec<(std::path::PathBuf, bool)> {
+        let mut seen = std::collections::HashSet::<std::ffi::OsString>::new();
+        let mut paths = Vec::new();
+
+        for source in &self.settings.overlay_directories {
+            if source.enabled {
+                Self::collect_overlay_dir(
+                    &source.path,
+                    source.write_ascii_alongside,
+                    &mut seen,
+                    &mut paths,
+                );
+            }
+        }
+
+        if let Some(pack) = Self::programdata_overlays_dir() {
+            Self::collect_overlay_dir(&pack, false, &mut seen, &mut paths);
+        }
+
+        if paths.is_empty() {
+            if let Some(legacy) = self.resolve_overlay_directory() {
+                Self::collect_overlay_dir(&legacy, false, &mut seen, &mut paths);
+            }
+        }
+
+        paths
     }
 
     fn resolve_overlay_directory(&self) -> Option<std::path::PathBuf> {

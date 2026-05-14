@@ -21,14 +21,16 @@
     * InstallScope is perMachine: System32 is admin-only. There is no
       per-user MatriSaver install today.
 
-  Known limitations of this scaffold (deferred to follow-up):
+  Overlay image pack (v0.2.1+):
 
-    * Overlay assets are NOT installed. resolve_overlay_directory()
-      walks ancestors of the .exe path looking for assets/overlays/, and
-      System32 has no such ancestor. After install, the user must either
-      set MATRISAVER_OVERLAY_DIR or the overlay subsystem stays inert
-      (rain still works). Adding [CommonAppDataFolder] install + an
-      io.rs fallback is the next step.
+    * The curated overlay images ship into
+      [CommonAppDataFolder]\matrisaver\overlays\ (= %ProgramData%\
+      matrisaver\overlays\). io.rs::overlay_image_paths treats that
+      directory as an always-on baseline source, so the ASCII-overlay
+      effect works out of the box after an MSI install. The pack is
+      its own opt-out Feature on the Customize page.
+
+  Known limitations of this scaffold (deferred to follow-up):
 
     * No code signing. The first MSI will trip SmartScreen — that's a
       cert procurement question, not a WXS one.
@@ -149,6 +151,61 @@
                     </Component>
                 </Directory>
             </Directory>
+
+            <!--
+              Overlay image pack → %ProgramData%\matrisaver\overlays\.
+              CommonAppDataFolder is the WiX built-in for %ProgramData%
+              (all-users, survives profile churn — the right home for a
+              screensaver's shared assets). Source paths are relative
+              to candle.exe's CWD, which cargo-wix sets to the crate
+              dir; ..\..\..\assets reaches the repo root.
+
+              Each image is its own single-file component with Guid='*'
+              — WiX auto-derives a stable GUID for a fixed-path,
+              file-keypath component, which is the idiomatic choice
+              here (unlike ScreensaverBinary, whose GUID is pinned
+              because its KeyPath identity must survive upgrades).
+
+              The two RemoveFolder entries piggyback on the README
+              component so the created directories are cleaned on
+              uninstall once their files are gone.
+            -->
+            <Directory Id='CommonAppDataFolder'>
+                <Directory Id='OverlayDataFolder' Name='matrisaver'>
+                    <Directory Id='OverlayImagesFolder' Name='overlays'>
+                        <Component Id='OverlayDefault' Guid='*'>
+                            <File Id='OverlayDefaultPng'
+                                  Name='matrisaver-default.png'
+                                  Source='..\..\..\assets\overlays\matrisaver-default.png'
+                                  KeyPath='yes'/>
+                        </Component>
+                        <Component Id='OverlayWhatsApp' Guid='*'>
+                            <File Id='OverlayWhatsAppJpeg'
+                                  Name='WhatsApp Image 2026-02-15 at 10.38.31.jpeg'
+                                  Source='..\..\..\assets\overlays\WhatsApp Image 2026-02-15 at 10.38.31.jpeg'
+                                  KeyPath='yes'/>
+                        </Component>
+                        <Component Id='OverlayEye' Guid='*'>
+                            <File Id='OverlayEyeJpg'
+                                  Name='stock-vector-all-seeing-eye-of-god-in-triangle-sacred-symbol-in-a-stylized-triangles-vector-monochrome-2189023981.jpg'
+                                  Source='..\..\..\assets\overlays\stock-vector-all-seeing-eye-of-god-in-triangle-sacred-symbol-in-a-stylized-triangles-vector-monochrome-2189023981.jpg'
+                                  KeyPath='yes'/>
+                        </Component>
+                        <Component Id='OverlayReadme' Guid='*'>
+                            <File Id='OverlayReadmeMd'
+                                  Name='README.md'
+                                  Source='..\..\..\assets\overlays\README.md'
+                                  KeyPath='yes'/>
+                            <RemoveFolder Id='RemoveOverlayImagesFolder'
+                                          Directory='OverlayImagesFolder'
+                                          On='uninstall'/>
+                            <RemoveFolder Id='RemoveOverlayDataFolder'
+                                          Directory='OverlayDataFolder'
+                                          On='uninstall'/>
+                        </Component>
+                    </Directory>
+                </Directory>
+            </Directory>
         </Directory>
 
         <Feature
@@ -171,6 +228,20 @@
             Display='expand'
             Absent='allow'>
             <ComponentRef Id='StartMenuShortcut'/>
+        </Feature>
+
+        <Feature
+            Id='OverlayImages'
+            Title='Overlay image pack'
+            Description='Installs the bundled overlay images into %ProgramData%\matrisaver\overlays\ so the ASCII-overlay effect works out of the box.'
+            Level='1'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='allow'>
+            <ComponentRef Id='OverlayDefault'/>
+            <ComponentRef Id='OverlayWhatsApp'/>
+            <ComponentRef Id='OverlayEye'/>
+            <ComponentRef Id='OverlayReadme'/>
         </Feature>
 
         <Property Id='ARPHELPLINK' Value='https://github.com/ophiocus/matrisaver'/>

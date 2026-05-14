@@ -317,7 +317,14 @@ pub mod config {
                 variant: "original".to_owned(),
                 pipeline: Pipeline::OpenGl,
                 glow_quality: GlowQuality::Balanced,
-                overlay_enabled: false,
+                // v0.2.1: overlays default on. The MSI ships the
+                // overlay pack into %ProgramData%\matrisaver\overlays\
+                // and the runtime treats that as an always-on
+                // baseline source, so a fresh install shows the
+                // ASCII-overlay effect without the user touching the
+                // dialog. Existing users keep whatever their saved
+                // settings.json says — only fresh settings get `true`.
+                overlay_enabled: true,
                 performance_mode: false,
                 multi_monitor: true,
                 char_size: 22,
