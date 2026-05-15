@@ -1001,44 +1001,42 @@ impl GpuRendererScaffold {
         // Helper closure to construct a bloom pipeline. Same vertex
         // state, same layout, varying only by entry point and blend
         // state (REPLACE for downsamples, additive for upsample).
-        let make_bloom_pipeline = |label: &str,
-                                   entry: &str,
-                                   blend: wgpu::BlendState|
-         -> wgpu::RenderPipeline {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&post_layout),
-                vertex: wgpu::VertexState {
-                    module: &bloom_shader,
-                    entry_point: Some("vs_screen"),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<ScreenVertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
+        let make_bloom_pipeline =
+            |label: &str, entry: &str, blend: wgpu::BlendState| -> wgpu::RenderPipeline {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&post_layout),
+                    vertex: wgpu::VertexState {
+                        module: &bloom_shader,
+                        entry_point: Some("vs_screen"),
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<ScreenVertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            }],
                         }],
-                    }],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &bloom_shader,
-                    entry_point: Some(entry),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT,
-                        blend: Some(blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &bloom_shader,
+                        entry_point: Some(entry),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: Some(blend),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
 
         let bloom_first_pipeline = make_bloom_pipeline(
             "matrisaver-scaffold-bloom-first-pipeline",
@@ -1784,8 +1782,7 @@ impl GpuRendererScaffold {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: self.bloom_post_buffers[downsample_idx(i)]
-                            .as_entire_binding(),
+                        resource: self.bloom_post_buffers[downsample_idx(i)].as_entire_binding(),
                     },
                 ],
             });
@@ -1853,8 +1850,7 @@ impl GpuRendererScaffold {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: self.bloom_post_buffers[upsample_idx(i)]
-                            .as_entire_binding(),
+                        resource: self.bloom_post_buffers[upsample_idx(i)].as_entire_binding(),
                     },
                 ],
             });
