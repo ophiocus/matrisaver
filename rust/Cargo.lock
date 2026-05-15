@@ -1930,12 +1930,13 @@ dependencies = [
 
 [[package]]
 name = "matrisaver-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ab_glyph",
  "bytemuck",
  "dirs",
  "image",
+ "naga",
  "pollster 0.4.0",
  "serde",
  "serde_json",
@@ -1944,21 +1945,21 @@ dependencies = [
 
 [[package]]
 name = "matrisaver-host-linux"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "matrisaver-core",
 ]
 
 [[package]]
 name = "matrisaver-host-macos"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "matrisaver-core",
 ]
 
 [[package]]
 name = "matrisaver-host-windows"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eframe",
  "egui",

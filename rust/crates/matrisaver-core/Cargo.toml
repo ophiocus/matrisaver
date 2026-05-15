@@ -17,3 +17,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # dir (%APPDATA% on Windows, $XDG_CONFIG_HOME/~/.config on Linux,
 # ~/Library/Application Support on macOS).
 dirs = "5"
+
+[dev-dependencies]
+# WGSL parser used by gpu::tests::wgsl_shaders_parse_cleanly to validate
+# each embedded shader string at `cargo test` time. naga is already in
+# the dep graph as a transitive dependency of wgpu, but we name it
+# explicitly here so the test isn't fragile to wgpu's re-export choices.
+# Version pinned to match wgpu 28's naga.
+naga = { version = "28", features = ["wgsl-in"] }

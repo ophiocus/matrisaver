@@ -95,6 +95,28 @@ struct PostUniform {
     _pad2: f32,
 }
 
+// Compile-time layout assertions for the GPU-bound uniform structs.
+// WGSL's uniform address space has stricter alignment rules than C
+// (`vec3<f32>` aligns to 16; nested arrays have stride 16; padding
+// after `f32` followed by `vec2/vec3/vec4` is not free). A silent
+// drift between the Rust layout and the WGSL-declared layout produces
+// a wgpu validation error at pipeline creation, not at compile time,
+// so by then the regression has already shipped to `/s`.
+//
+// These const-asserts make the layout part of the type system. If
+// anyone adds a field or changes a type, the build fails immediately
+// with a message pointing at the size expectation that was violated.
+// Cross-check the expectations with the WGSL `struct` declarations in
+// the shader sources — same number of bytes, same field order.
+const _: () = assert!(
+    std::mem::size_of::<GlobalUniform>() == 48,
+    "GlobalUniform must be 48 bytes — Rust struct layout drifted from the WGSL declaration"
+);
+const _: () = assert!(
+    std::mem::size_of::<PostUniform>() == 32,
+    "PostUniform must be 32 bytes — Rust struct layout drifted from the WGSL declaration"
+);
+
 /// Number of bloom mip levels. Mip 0 is `surface / downsample_factor`,
 /// each subsequent mip halves both dimensions. 5 levels at base 1/2
 /// gives sizes 1/2, 1/4, 1/8, 1/16, 1/32 — wide enough for the soft
@@ -148,6 +170,387 @@ const SCREEN_VERTICES: [ScreenVertex; 6] = [
         position: [-1.0, 1.0],
     },
 ];
+
+// ─────────────────────────────────────────────────────────────────────
+// WGSL shader sources
+// ─────────────────────────────────────────────────────────────────────
+//
+// Extracted to module-level constants so they're (a) usable by the
+// pipeline-creation paths AND (b) parse-testable via naga without a
+// GPU. The `wgsl_shaders_parse_cleanly` test runs `naga::front::wgsl::parse_str`
+// against each one, catching syntax errors at `cargo test` time rather
+// than at first `/s` launch. See the matching test below.
+
+const GLYPH_SHADER_WGSL: &str = "
+    struct Globals {
+        inv_size: vec2<f32>,
+        time_pad: vec2<f32>,
+        glyph_tint: vec4<f32>,
+        style_params: vec4<f32>,
+    };
+
+    @group(0) @binding(0)
+    var<uniform> globals: Globals;
+
+    @group(1) @binding(0)
+    var atlas_tex: texture_2d<f32>;
+
+    @group(1) @binding(1)
+    var atlas_sampler: sampler;
+
+    struct VertexIn {
+        @location(0) local_pos: vec2<f32>,
+        @location(1) instance_pos_size: vec4<f32>,
+        @location(2) instance_uv: vec4<f32>,
+        @location(3) instance_params: vec4<f32>,
+    };
+
+    struct VertexOut {
+        @builtin(position) clip_position: vec4<f32>,
+        @location(0) uv: vec2<f32>,
+        @location(1) brightness: f32,
+        @location(2) head_boost: f32,
+        @location(3) grain: f32,
+        @location(4) style_tag: f32,
+    };
+
+    @vertex
+    fn vs_main(input: VertexIn) -> VertexOut {
+        let pixel = input.instance_pos_size.xy + input.local_pos * input.instance_pos_size.zw;
+        let clip = vec2<f32>(
+            pixel.x * globals.inv_size.x - 1.0,
+            1.0 - pixel.y * globals.inv_size.y
+        );
+
+        var output: VertexOut;
+        output.clip_position = vec4<f32>(clip, 0.0, 1.0);
+        let uv_t = input.local_pos + vec2<f32>(0.5, 0.5);
+        output.uv = mix(input.instance_uv.xy, input.instance_uv.zw, uv_t);
+        output.brightness = input.instance_params.x;
+        output.head_boost = input.instance_params.y;
+        output.grain = input.instance_params.z;
+        output.style_tag = input.instance_params.w;
+        return output;
+    }
+
+    @fragment
+    fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+        let atlas_value = textureSample(atlas_tex, atlas_sampler, input.uv).r;
+        let glyph_mask = smoothstep(0.15, 0.78, atlas_value);
+        let edge_glint = smoothstep(0.75, 1.0, atlas_value) * input.head_boost;
+        let is_ghost = step(1.5, input.style_tag);
+        let is_volatile = step(0.5, input.style_tag) - is_ghost;
+        let pulse = (0.5 + 0.5 * sin((input.grain + input.brightness) * 18.0))
+            * is_volatile
+            * globals.style_params.w;
+        let raw_value = clamp(
+            input.brightness * glyph_mask + edge_glint * (0.45 + globals.style_params.y * 0.2),
+            0.0,
+            1.0,
+        );
+        let volatile_gamma = max(globals.style_params.x, 0.35);
+        let value_base = pow(raw_value, mix(1.0, 1.0 / volatile_gamma, is_volatile));
+        let value_pulsed = clamp(value_base * (1.0 + pulse), 0.0, 1.0);
+        let value_final = value_pulsed;
+        let head_mix = clamp(input.head_boost * (0.65 + globals.style_params.y * 0.35), 0.0, 1.0);
+        let base_color = globals.glyph_tint.rgb;
+        let head_color = mix(base_color, vec3<f32>(0.86, 1.0, 0.92), head_mix);
+        let ghost_color = mix(base_color * 0.28, vec3<f32>(0.08, 0.22, 0.14), 0.35);
+
+        // Specular sheen on head glyphs — a tight diagonal
+        // highlight band raking across the glyph, time-driven,
+        // gated by head_mix so only leading heads chrome up.
+        // (uv.x + uv.y) is the diagonal coordinate; pow() tightens
+        // the band; the cool-white tint reads as liquid-mirror
+        // rather than merely a brighter green.
+        let sheen_phase = (input.uv.x + input.uv.y) * 3.0 - globals.time_pad.x * 2.2;
+        let sheen_band = pow(max(sin(sheen_phase) * 0.5 + 0.5, 0.0), 6.0);
+        let sheen = sheen_band * head_mix * 0.6;
+        let head_sheened = head_color + vec3<f32>(0.55, 0.72, 0.62) * sheen;
+
+        // HDR head boost — head glyphs emit super-bright
+        // luminance into the Rgba16Float scene buffer so
+        // the mip-chain bloom has real headroom to grow
+        // a wide soft halo. head_mix gates this so only
+        // leading heads crank up; trails stay near 1.0
+        // and don't blow out the bloom.
+        let head_hdr_scale = 1.0 + head_mix * 3.0;
+        let head_emissive = head_sheened * head_hdr_scale;
+
+        let color = mix(head_emissive, ghost_color, is_ghost);
+        let alpha_scale = mix(1.0, globals.style_params.z, is_ghost);
+        let grain = 0.95 + input.grain * 0.08;
+        return vec4<f32>(color * value_final * grain * alpha_scale, 1.0);
+    }
+";
+
+// Mip-chain bloom shader (replaces the old prefilter + separable
+// blur). Three fragment entry points:
+//   - fs_first_downsample: Karis luma-weighted 13-tap average
+//     plus soft-knee HDR threshold. Run once, reads full-size
+//     persist_curr, writes bloom mip 0. The Karis weighting
+//     kills HDR fireflies that would otherwise survive into
+//     every subsequent mip and bloom unnaturally.
+//   - fs_downsample: plain 13-tap downsample (Call of Duty:
+//     Advanced Warfare technique, per LearnOpenGL's
+//     physically-based bloom article). Run on mips 1..N.
+//   - fs_upsample: 9-tap tent filter. Run on mips N-1..0 with
+//     additive blend at the pipeline level so each level adds
+//     to the one below for smooth wide falloff.
+const BLOOM_SHADER_WGSL: &str = "
+    struct PostUniform {
+        texel_size: vec2<f32>,
+        threshold: f32,
+        intensity: f32,
+        mode: f32,
+        _pad0: f32,
+        _pad1: f32,
+        _pad2: f32,
+    };
+
+    @group(0) @binding(0)
+    var src_tex: texture_2d<f32>;
+
+    @group(0) @binding(1)
+    var src_sampler: sampler;
+
+    @group(0) @binding(2)
+    var<uniform> post: PostUniform;
+
+    struct VertexIn {
+        @location(0) pos: vec2<f32>,
+    };
+
+    struct VertexOut {
+        @builtin(position) clip_position: vec4<f32>,
+        @location(0) uv: vec2<f32>,
+    };
+
+    @vertex
+    fn vs_screen(input: VertexIn) -> VertexOut {
+        var output: VertexOut;
+        output.clip_position = vec4<f32>(input.pos, 0.0, 1.0);
+        output.uv = input.pos * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+        return output;
+    }
+
+    // Karis average: weight each tap by 1/(1+luma) to
+    // pull the average toward dim taps, which prevents
+    // a single super-bright HDR pixel from dominating
+    // the box and surviving into deeper mips as a
+    // sparkling 'firefly'.
+    fn karis_weight(c: vec3<f32>) -> f32 {
+        let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        return 1.0 / (1.0 + luma);
+    }
+
+    // 13-tap downsample (CoD:AW). Samples a 4x4 region as
+    // four 2x2 sub-averages plus a center cluster, then
+    // weights them so the result has minimal aliasing
+    // when feeding the next mip down.
+    fn downsample_13_tap(uv: vec2<f32>, texel: vec2<f32>, karis: bool) -> vec3<f32> {
+        let a = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-2.0, -2.0)).rgb;
+        let b = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 0.0, -2.0)).rgb;
+        let c = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 2.0, -2.0)).rgb;
+        let d = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-2.0,  0.0)).rgb;
+        let e = textureSample(src_tex, src_sampler, uv).rgb;
+        let f = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 2.0,  0.0)).rgb;
+        let g = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-2.0,  2.0)).rgb;
+        let h = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 0.0,  2.0)).rgb;
+        let i = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 2.0,  2.0)).rgb;
+        let j = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-1.0, -1.0)).rgb;
+        let k = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 1.0, -1.0)).rgb;
+        let l = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-1.0,  1.0)).rgb;
+        let m = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 1.0,  1.0)).rgb;
+
+        if (karis) {
+            // First mip — partition into 5 groups and apply
+            // per-group Karis weighting before combining.
+            let g0 = (a + b + d + e) * 0.25;
+            let g1 = (b + c + e + f) * 0.25;
+            let g2 = (d + e + g + h) * 0.25;
+            let g3 = (e + f + h + i) * 0.25;
+            let g4 = (j + k + l + m) * 0.25;
+            let w0 = karis_weight(g0);
+            let w1 = karis_weight(g1);
+            let w2 = karis_weight(g2);
+            let w3 = karis_weight(g3);
+            let w4 = karis_weight(g4);
+            // Group 4 (the center cluster) weighted 0.5,
+            // outer corners 0.125 each — matches the CoD
+            // recipe's energy distribution.
+            let sum = g0 * w0 * 0.125 + g1 * w1 * 0.125
+                   + g2 * w2 * 0.125 + g3 * w3 * 0.125
+                   + g4 * w4 * 0.5;
+            let wsum = w0 * 0.125 + w1 * 0.125
+                     + w2 * 0.125 + w3 * 0.125 + w4 * 0.5;
+            return sum / max(wsum, 0.0001);
+        }
+
+        // Deeper mips — straight weighted average.
+        return e * 0.125
+             + (a + c + g + i) * 0.03125
+             + (b + d + f + h) * 0.0625
+             + (j + k + l + m) * 0.125;
+    }
+
+    // Soft-knee HDR threshold (Unreal-style). Linear
+    // threshold has a hard cutoff that flickers; the
+    // knee fades pixels in over a half-stop window.
+    fn soft_threshold(color: vec3<f32>, threshold: f32) -> vec3<f32> {
+        let knee = threshold * 0.5;
+        let luma = max(color.r, max(color.g, color.b));
+        let soft = clamp(luma - threshold + knee, 0.0, 2.0 * knee);
+        let soft_factor = soft * soft / max(4.0 * knee * knee, 0.0001);
+        let contrib = max(luma - threshold, soft_factor) / max(luma, 0.0001);
+        return color * contrib;
+    }
+
+    @fragment
+    fn fs_first_downsample(input: VertexOut) -> @location(0) vec4<f32> {
+        let sampled = downsample_13_tap(input.uv, post.texel_size, true);
+        let bloomed = soft_threshold(sampled, post.threshold) * post.intensity;
+        return vec4<f32>(bloomed, 1.0);
+    }
+
+    @fragment
+    fn fs_downsample(input: VertexOut) -> @location(0) vec4<f32> {
+        let sampled = downsample_13_tap(input.uv, post.texel_size, false);
+        return vec4<f32>(sampled, 1.0);
+    }
+
+    // 9-tap tent filter upsample. Each call samples a
+    // small 3x3 neighborhood from the smaller mip above
+    // and writes additively into the larger mip below
+    // (additive blend is on the pipeline). Compounding
+    // these calls produces the wide soft falloff that
+    // reads as phosphor wash rather than a Gaussian
+    // halo.
+    @fragment
+    fn fs_upsample(input: VertexOut) -> @location(0) vec4<f32> {
+        let t = post.texel_size;
+        let a = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(-t.x, -t.y)).rgb;
+        let b = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( 0.0, -t.y)).rgb;
+        let c = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( t.x, -t.y)).rgb;
+        let d = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(-t.x,  0.0)).rgb;
+        let e = textureSample(src_tex, src_sampler, input.uv).rgb;
+        let f = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( t.x,  0.0)).rgb;
+        let g = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(-t.x,  t.y)).rgb;
+        let h = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( 0.0,  t.y)).rgb;
+        let i = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( t.x,  t.y)).rgb;
+        let tent = e * 0.25
+                 + (b + d + f + h) * 0.125
+                 + (a + c + g + i) * 0.0625;
+        return vec4<f32>(tent * post.intensity, 1.0);
+    }
+";
+
+const POST_COMPOSITE_SHADER_WGSL: &str = "
+    @group(0) @binding(0)
+    var scene_tex: texture_2d<f32>;
+
+    @group(0) @binding(1)
+    var glow_tex: texture_2d<f32>;
+
+    @group(0) @binding(2)
+    var mix_sampler: sampler;
+
+    struct VertexIn {
+        @location(0) pos: vec2<f32>,
+    };
+
+    struct VertexOut {
+        @builtin(position) clip_position: vec4<f32>,
+        @location(0) uv: vec2<f32>,
+    };
+
+    @vertex
+    fn vs_screen(input: VertexIn) -> VertexOut {
+        var output: VertexOut;
+        output.clip_position = vec4<f32>(input.pos, 0.0, 1.0);
+        output.uv = input.pos * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+        return output;
+    }
+
+    // ACES filmic tone map — Krzysztof Narkowicz's
+    // approximation. Preserves the institutional green
+    // character of the 1999 grade in highlights better
+    // than Reinhard, which would desaturate toward
+    // white. Folds the open-ended HDR range into the
+    // display's 0..1 with a filmic shoulder.
+    fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+        let a = 2.51;
+        let b = 0.03;
+        let c = 2.43;
+        let d = 0.59;
+        let e = 0.14;
+        return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+
+    @fragment
+    fn fs_composite(input: VertexOut) -> @location(0) vec4<f32> {
+        let scene = textureSample(scene_tex, mix_sampler, input.uv).rgb;
+        let glow = textureSample(glow_tex, mix_sampler, input.uv).rgb;
+        // Combine HDR scene + HDR bloom in linear space,
+        // then tone-map once at the end. Bloom intensity
+        // is part of the bloom upsample now (post.intensity);
+        // here we apply a final compositing weight.
+        let hdr = scene + glow * 0.9;
+        var color = aces_tonemap(hdr);
+        // Crush blacks — 1999 Matrix chiaroscuro look. Pull
+        // the toe to true black so the institutional green
+        // sits on a void rather than a muddy near-black,
+        // then a tiny gain to compensate for the floor lift.
+        color = max(color - vec3<f32>(0.018, 0.018, 0.018), vec3<f32>(0.0));
+        color = color * 1.05;
+        return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
+";
+
+// Phosphor-persistence pass. Reads the freshly-drawn scene plus
+// the previous frame's persisted buffer; emits max(scene,
+// prev * decay). max() (not additive accumulation) is the
+// phosphor model — bright glyphs persist and decay, dark
+// regions don't runaway-brighten. Bind layout is identical to
+// the composite pass (two textures + sampler), so it reuses
+// composite_layout. Decay is a shader constant — no uniform,
+// which sidesteps any post_buffer write-ordering question.
+const POST_PERSISTENCE_SHADER_WGSL: &str = "
+    @group(0) @binding(0)
+    var scene_tex: texture_2d<f32>;
+
+    @group(0) @binding(1)
+    var prev_tex: texture_2d<f32>;
+
+    @group(0) @binding(2)
+    var persist_sampler: sampler;
+
+    struct VertexIn {
+        @location(0) pos: vec2<f32>,
+    };
+
+    struct VertexOut {
+        @builtin(position) clip_position: vec4<f32>,
+        @location(0) uv: vec2<f32>,
+    };
+
+    @vertex
+    fn vs_screen(input: VertexIn) -> VertexOut {
+        var output: VertexOut;
+        output.clip_position = vec4<f32>(input.pos, 0.0, 1.0);
+        output.uv = input.pos * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+        return output;
+    }
+
+    @fragment
+    fn fs_persist(input: VertexOut) -> @location(0) vec4<f32> {
+        let decay = 0.86;
+        let scene = textureSample(scene_tex, persist_sampler, input.uv).rgb;
+        let prev = textureSample(prev_tex, persist_sampler, input.uv).rgb;
+        let persisted = max(scene, prev * decay);
+        return vec4<f32>(persisted, 1.0);
+    }
+";
 
 struct AtlasSurface<'a> {
     pixels: &'a mut [u8],
@@ -332,398 +735,23 @@ impl GpuRendererScaffold {
         queue: wgpu::Queue,
     ) -> Result<Self, String> {
         let glyph_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("matrisaver-scaffold-glyph-shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    "
-                    struct Globals {
-                        inv_size: vec2<f32>,
-                        time_pad: vec2<f32>,
-                        glyph_tint: vec4<f32>,
-                        style_params: vec4<f32>,
-                    };
+            label: Some("matrisaver-scaffold-glyph-shader"),
+            source: wgpu::ShaderSource::Wgsl(GLYPH_SHADER_WGSL.into()),
+        });
 
-                    @group(0) @binding(0)
-                    var<uniform> globals: Globals;
-
-                    @group(1) @binding(0)
-                    var atlas_tex: texture_2d<f32>;
-
-                    @group(1) @binding(1)
-                    var atlas_sampler: sampler;
-
-                    struct VertexIn {
-                        @location(0) local_pos: vec2<f32>,
-                        @location(1) instance_pos_size: vec4<f32>,
-                        @location(2) instance_uv: vec4<f32>,
-                        @location(3) instance_params: vec4<f32>,
-                    };
-
-                    struct VertexOut {
-                        @builtin(position) clip_position: vec4<f32>,
-                        @location(0) uv: vec2<f32>,
-                        @location(1) brightness: f32,
-                        @location(2) head_boost: f32,
-                        @location(3) grain: f32,
-                        @location(4) style_tag: f32,
-                    };
-
-                    @vertex
-                    fn vs_main(input: VertexIn) -> VertexOut {
-                        let pixel = input.instance_pos_size.xy + input.local_pos * input.instance_pos_size.zw;
-                        let clip = vec2<f32>(
-                            pixel.x * globals.inv_size.x - 1.0,
-                            1.0 - pixel.y * globals.inv_size.y
-                        );
-
-                        var output: VertexOut;
-                        output.clip_position = vec4<f32>(clip, 0.0, 1.0);
-                        let uv_t = input.local_pos + vec2<f32>(0.5, 0.5);
-                        output.uv = mix(input.instance_uv.xy, input.instance_uv.zw, uv_t);
-                        output.brightness = input.instance_params.x;
-                        output.head_boost = input.instance_params.y;
-                        output.grain = input.instance_params.z;
-                        output.style_tag = input.instance_params.w;
-                        return output;
-                    }
-
-                    @fragment
-                    fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-                        let atlas_value = textureSample(atlas_tex, atlas_sampler, input.uv).r;
-                        let glyph_mask = smoothstep(0.15, 0.78, atlas_value);
-                        let edge_glint = smoothstep(0.75, 1.0, atlas_value) * input.head_boost;
-                        let is_ghost = step(1.5, input.style_tag);
-                        let is_volatile = step(0.5, input.style_tag) - is_ghost;
-                        let pulse = (0.5 + 0.5 * sin((input.grain + input.brightness) * 18.0))
-                            * is_volatile
-                            * globals.style_params.w;
-                        let raw_value = clamp(
-                            input.brightness * glyph_mask + edge_glint * (0.45 + globals.style_params.y * 0.2),
-                            0.0,
-                            1.0,
-                        );
-                        let volatile_gamma = max(globals.style_params.x, 0.35);
-                        let value_base = pow(raw_value, mix(1.0, 1.0 / volatile_gamma, is_volatile));
-                        let value_pulsed = clamp(value_base * (1.0 + pulse), 0.0, 1.0);
-                        let value_final = value_pulsed;
-                        let head_mix = clamp(input.head_boost * (0.65 + globals.style_params.y * 0.35), 0.0, 1.0);
-                        let base_color = globals.glyph_tint.rgb;
-                        let head_color = mix(base_color, vec3<f32>(0.86, 1.0, 0.92), head_mix);
-                        let ghost_color = mix(base_color * 0.28, vec3<f32>(0.08, 0.22, 0.14), 0.35);
-
-                        // Specular sheen on head glyphs — a tight diagonal
-                        // highlight band raking across the glyph, time-driven,
-                        // gated by head_mix so only leading heads chrome up.
-                        // (uv.x + uv.y) is the diagonal coordinate; pow() tightens
-                        // the band; the cool-white tint reads as liquid-mirror
-                        // rather than merely a brighter green.
-                        let sheen_phase = (input.uv.x + input.uv.y) * 3.0 - globals.time_pad.x * 2.2;
-                        let sheen_band = pow(max(sin(sheen_phase) * 0.5 + 0.5, 0.0), 6.0);
-                        let sheen = sheen_band * head_mix * 0.6;
-                        let head_sheened = head_color + vec3<f32>(0.55, 0.72, 0.62) * sheen;
-
-                        // HDR head boost — head glyphs emit super-bright
-                        // luminance into the Rgba16Float scene buffer so
-                        // the mip-chain bloom has real headroom to grow
-                        // a wide soft halo. head_mix gates this so only
-                        // leading heads crank up; trails stay near 1.0
-                        // and don't blow out the bloom.
-                        let head_hdr_scale = 1.0 + head_mix * 3.0;
-                        let head_emissive = head_sheened * head_hdr_scale;
-
-                        let color = mix(head_emissive, ghost_color, is_ghost);
-                        let alpha_scale = mix(1.0, globals.style_params.z, is_ghost);
-                        let grain = 0.95 + input.grain * 0.08;
-                        return vec4<f32>(color * value_final * grain * alpha_scale, 1.0);
-                    }
-                    "
-                    .into(),
-                ),
-            });
-
-        // Mip-chain bloom shader (replaces the old prefilter + separable
-        // blur). Three fragment entry points:
-        //   - fs_first_downsample: Karis luma-weighted 13-tap average
-        //     plus soft-knee HDR threshold. Run once, reads full-size
-        //     persist_curr, writes bloom mip 0. The Karis weighting
-        //     kills HDR fireflies that would otherwise survive into
-        //     every subsequent mip and bloom unnaturally.
-        //   - fs_downsample: plain 13-tap downsample (Call of Duty:
-        //     Advanced Warfare technique, per LearnOpenGL's
-        //     physically-based bloom article). Run on mips 1..N.
-        //   - fs_upsample: 9-tap tent filter. Run on mips N-1..0 with
-        //     additive blend at the pipeline level so each level adds
-        //     to the one below for smooth wide falloff.
         let bloom_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("matrisaver-scaffold-bloom-shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    "
-                    struct PostUniform {
-                        texel_size: vec2<f32>,
-                        threshold: f32,
-                        intensity: f32,
-                        mode: f32,
-                        _pad0: f32,
-                        _pad1: f32,
-                        _pad2: f32,
-                    };
-
-                    @group(0) @binding(0)
-                    var src_tex: texture_2d<f32>;
-
-                    @group(0) @binding(1)
-                    var src_sampler: sampler;
-
-                    @group(0) @binding(2)
-                    var<uniform> post: PostUniform;
-
-                    struct VertexIn {
-                        @location(0) pos: vec2<f32>,
-                    };
-
-                    struct VertexOut {
-                        @builtin(position) clip_position: vec4<f32>,
-                        @location(0) uv: vec2<f32>,
-                    };
-
-                    @vertex
-                    fn vs_screen(input: VertexIn) -> VertexOut {
-                        var output: VertexOut;
-                        output.clip_position = vec4<f32>(input.pos, 0.0, 1.0);
-                        output.uv = input.pos * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
-                        return output;
-                    }
-
-                    // Karis average: weight each tap by 1/(1+luma) to
-                    // pull the average toward dim taps, which prevents
-                    // a single super-bright HDR pixel from dominating
-                    // the box and surviving into deeper mips as a
-                    // sparkling 'firefly'.
-                    fn karis_weight(c: vec3<f32>) -> f32 {
-                        let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-                        return 1.0 / (1.0 + luma);
-                    }
-
-                    // 13-tap downsample (CoD:AW). Samples a 4x4 region as
-                    // four 2x2 sub-averages plus a center cluster, then
-                    // weights them so the result has minimal aliasing
-                    // when feeding the next mip down.
-                    fn downsample_13_tap(uv: vec2<f32>, texel: vec2<f32>, karis: bool) -> vec3<f32> {
-                        let a = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-2.0, -2.0)).rgb;
-                        let b = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 0.0, -2.0)).rgb;
-                        let c = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 2.0, -2.0)).rgb;
-                        let d = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-2.0,  0.0)).rgb;
-                        let e = textureSample(src_tex, src_sampler, uv).rgb;
-                        let f = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 2.0,  0.0)).rgb;
-                        let g = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-2.0,  2.0)).rgb;
-                        let h = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 0.0,  2.0)).rgb;
-                        let i = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 2.0,  2.0)).rgb;
-                        let j = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-1.0, -1.0)).rgb;
-                        let k = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 1.0, -1.0)).rgb;
-                        let l = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-1.0,  1.0)).rgb;
-                        let m = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 1.0,  1.0)).rgb;
-
-                        if (karis) {
-                            // First mip — partition into 5 groups and apply
-                            // per-group Karis weighting before combining.
-                            let g0 = (a + b + d + e) * 0.25;
-                            let g1 = (b + c + e + f) * 0.25;
-                            let g2 = (d + e + g + h) * 0.25;
-                            let g3 = (e + f + h + i) * 0.25;
-                            let g4 = (j + k + l + m) * 0.25;
-                            let w0 = karis_weight(g0);
-                            let w1 = karis_weight(g1);
-                            let w2 = karis_weight(g2);
-                            let w3 = karis_weight(g3);
-                            let w4 = karis_weight(g4);
-                            // Group 4 (the center cluster) weighted 0.5,
-                            // outer corners 0.125 each — matches the CoD
-                            // recipe's energy distribution.
-                            let sum = g0 * w0 * 0.125 + g1 * w1 * 0.125
-                                   + g2 * w2 * 0.125 + g3 * w3 * 0.125
-                                   + g4 * w4 * 0.5;
-                            let wsum = w0 * 0.125 + w1 * 0.125
-                                     + w2 * 0.125 + w3 * 0.125 + w4 * 0.5;
-                            return sum / max(wsum, 0.0001);
-                        }
-
-                        // Deeper mips — straight weighted average.
-                        return e * 0.125
-                             + (a + c + g + i) * 0.03125
-                             + (b + d + f + h) * 0.0625
-                             + (j + k + l + m) * 0.125;
-                    }
-
-                    // Soft-knee HDR threshold (Unreal-style). Linear
-                    // threshold has a hard cutoff that flickers; the
-                    // knee fades pixels in over a half-stop window.
-                    fn soft_threshold(color: vec3<f32>, threshold: f32) -> vec3<f32> {
-                        let knee = threshold * 0.5;
-                        let luma = max(color.r, max(color.g, color.b));
-                        let soft = clamp(luma - threshold + knee, 0.0, 2.0 * knee);
-                        let soft_factor = soft * soft / max(4.0 * knee * knee, 0.0001);
-                        let contrib = max(luma - threshold, soft_factor) / max(luma, 0.0001);
-                        return color * contrib;
-                    }
-
-                    @fragment
-                    fn fs_first_downsample(input: VertexOut) -> @location(0) vec4<f32> {
-                        let sampled = downsample_13_tap(input.uv, post.texel_size, true);
-                        let bloomed = soft_threshold(sampled, post.threshold) * post.intensity;
-                        return vec4<f32>(bloomed, 1.0);
-                    }
-
-                    @fragment
-                    fn fs_downsample(input: VertexOut) -> @location(0) vec4<f32> {
-                        let sampled = downsample_13_tap(input.uv, post.texel_size, false);
-                        return vec4<f32>(sampled, 1.0);
-                    }
-
-                    // 9-tap tent filter upsample. Each call samples a
-                    // small 3x3 neighborhood from the smaller mip above
-                    // and writes additively into the larger mip below
-                    // (additive blend is on the pipeline). Compounding
-                    // these calls produces the wide soft falloff that
-                    // reads as phosphor wash rather than a Gaussian
-                    // halo.
-                    @fragment
-                    fn fs_upsample(input: VertexOut) -> @location(0) vec4<f32> {
-                        let t = post.texel_size;
-                        let a = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(-t.x, -t.y)).rgb;
-                        let b = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( 0.0, -t.y)).rgb;
-                        let c = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( t.x, -t.y)).rgb;
-                        let d = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(-t.x,  0.0)).rgb;
-                        let e = textureSample(src_tex, src_sampler, input.uv).rgb;
-                        let f = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( t.x,  0.0)).rgb;
-                        let g = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(-t.x,  t.y)).rgb;
-                        let h = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( 0.0,  t.y)).rgb;
-                        let i = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( t.x,  t.y)).rgb;
-                        let tent = e * 0.25
-                                 + (b + d + f + h) * 0.125
-                                 + (a + c + g + i) * 0.0625;
-                        return vec4<f32>(tent * post.intensity, 1.0);
-                    }
-                    "
-                    .into(),
-                ),
-            });
+            label: Some("matrisaver-scaffold-bloom-shader"),
+            source: wgpu::ShaderSource::Wgsl(BLOOM_SHADER_WGSL.into()),
+        });
 
         let post_composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("matrisaver-scaffold-post-composite-shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                "
-                    @group(0) @binding(0)
-                    var scene_tex: texture_2d<f32>;
-
-                    @group(0) @binding(1)
-                    var glow_tex: texture_2d<f32>;
-
-                    @group(0) @binding(2)
-                    var mix_sampler: sampler;
-
-                    struct VertexIn {
-                        @location(0) pos: vec2<f32>,
-                    };
-
-                    struct VertexOut {
-                        @builtin(position) clip_position: vec4<f32>,
-                        @location(0) uv: vec2<f32>,
-                    };
-
-                    @vertex
-                    fn vs_screen(input: VertexIn) -> VertexOut {
-                        var output: VertexOut;
-                        output.clip_position = vec4<f32>(input.pos, 0.0, 1.0);
-                        output.uv = input.pos * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
-                        return output;
-                    }
-
-                    // ACES filmic tone map — Krzysztof Narkowicz's
-                    // approximation. Preserves the institutional green
-                    // character of the 1999 grade in highlights better
-                    // than Reinhard, which would desaturate toward
-                    // white. Folds the open-ended HDR range into the
-                    // display's 0..1 with a filmic shoulder.
-                    fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
-                        let a = 2.51;
-                        let b = 0.03;
-                        let c = 2.43;
-                        let d = 0.59;
-                        let e = 0.14;
-                        return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
-                    }
-
-                    @fragment
-                    fn fs_composite(input: VertexOut) -> @location(0) vec4<f32> {
-                        let scene = textureSample(scene_tex, mix_sampler, input.uv).rgb;
-                        let glow = textureSample(glow_tex, mix_sampler, input.uv).rgb;
-                        // Combine HDR scene + HDR bloom in linear space,
-                        // then tone-map once at the end. Bloom intensity
-                        // is part of the bloom upsample now (post.intensity);
-                        // here we apply a final compositing weight.
-                        let hdr = scene + glow * 0.9;
-                        var color = aces_tonemap(hdr);
-                        // Crush blacks — 1999 Matrix chiaroscuro look. Pull
-                        // the toe to true black so the institutional green
-                        // sits on a void rather than a muddy near-black,
-                        // then a tiny gain to compensate for the floor lift.
-                        color = max(color - vec3<f32>(0.018, 0.018, 0.018), vec3<f32>(0.0));
-                        color = color * 1.05;
-                        return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-                    }
-                    "
-                .into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(POST_COMPOSITE_SHADER_WGSL.into()),
         });
 
-        // Phosphor-persistence pass. Reads the freshly-drawn scene plus
-        // the previous frame's persisted buffer; emits max(scene,
-        // prev * decay). max() (not additive accumulation) is the
-        // phosphor model — bright glyphs persist and decay, dark
-        // regions don't runaway-brighten. Bind layout is identical to
-        // the composite pass (two textures + sampler), so it reuses
-        // composite_layout. Decay is a shader constant — no uniform,
-        // which sidesteps any post_buffer write-ordering question.
         let post_persistence_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("matrisaver-scaffold-post-persistence-shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                "
-                    @group(0) @binding(0)
-                    var scene_tex: texture_2d<f32>;
-
-                    @group(0) @binding(1)
-                    var prev_tex: texture_2d<f32>;
-
-                    @group(0) @binding(2)
-                    var persist_sampler: sampler;
-
-                    struct VertexIn {
-                        @location(0) pos: vec2<f32>,
-                    };
-
-                    struct VertexOut {
-                        @builtin(position) clip_position: vec4<f32>,
-                        @location(0) uv: vec2<f32>,
-                    };
-
-                    @vertex
-                    fn vs_screen(input: VertexIn) -> VertexOut {
-                        var output: VertexOut;
-                        output.clip_position = vec4<f32>(input.pos, 0.0, 1.0);
-                        output.uv = input.pos * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
-                        return output;
-                    }
-
-                    @fragment
-                    fn fs_persist(input: VertexOut) -> @location(0) vec4<f32> {
-                        let decay = 0.86;
-                        let scene = textureSample(scene_tex, persist_sampler, input.uv).rgb;
-                        let prev = textureSample(prev_tex, persist_sampler, input.uv).rgb;
-                        let persisted = max(scene, prev * decay);
-                        return vec4<f32>(persisted, 1.0);
-                    }
-                    "
-                .into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(POST_PERSISTENCE_SHADER_WGSL.into()),
         });
 
         let global_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1908,5 +1936,68 @@ impl GpuRendererScaffold {
 
         // Ping-pong: this frame's `curr` becomes next frame's `prev`.
         self.persist_toggle = !persist_toggle;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Validates each embedded shader string parses as WGSL. naga is the
+    // same WGSL frontend wgpu uses internally, so a parse failure here
+    // would also be a `create_shader_module` failure at runtime — but
+    // catching it at `cargo test` time means we hit it locally (and on
+    // ci.yml's gates) instead of at first `/s` launch.
+    //
+    // Lineage: a stray `"` inside a WGSL comment earlier in this file's
+    // history caused a "prefix `green` is unknown" parse error that only
+    // showed up at GPU init. This test class would have caught that
+    // before commit, even on a machine with no GPU.
+    fn assert_wgsl_parses(label: &str, source: &str) {
+        if let Err(error) = naga::front::wgsl::parse_str(source) {
+            panic!(
+                "WGSL parse failed for {label}: {}",
+                error.emit_to_string(source)
+            );
+        }
+    }
+
+    #[test]
+    fn glyph_shader_parses() {
+        assert_wgsl_parses("GLYPH_SHADER_WGSL", GLYPH_SHADER_WGSL);
+    }
+
+    #[test]
+    fn bloom_shader_parses() {
+        assert_wgsl_parses("BLOOM_SHADER_WGSL", BLOOM_SHADER_WGSL);
+    }
+
+    #[test]
+    fn post_composite_shader_parses() {
+        assert_wgsl_parses("POST_COMPOSITE_SHADER_WGSL", POST_COMPOSITE_SHADER_WGSL);
+    }
+
+    #[test]
+    fn post_persistence_shader_parses() {
+        assert_wgsl_parses("POST_PERSISTENCE_SHADER_WGSL", POST_PERSISTENCE_SHADER_WGSL);
+    }
+
+    // Cross-check that the Rust-side uniform struct sizes match what
+    // the WGSL `struct` declarations imply. The const-asserts at the
+    // top of this file lock the Rust side; this test locks the WGSL
+    // side. If someone adds a field to one and forgets the other, the
+    // size assertion below trips before pipeline creation does.
+    #[test]
+    fn uniform_struct_sizes_match_wgsl_declarations() {
+        // GlobalUniform: vec2 + vec2 + vec4 + vec4 = 8+8+16+16 = 48 bytes.
+        assert_eq!(std::mem::size_of::<GlobalUniform>(), 48);
+
+        // PostUniform: vec2 + f32*5 + vec3-of-pad-as-3-scalars
+        //            = 8 + 4 + 4 + 4 + 4 + 4 + 4 = 32 bytes.
+        // Critical: the three trailing `_padN: f32` fields are *not*
+        // `_pad: vec3<f32>` — vec3 would force 16-byte alignment and
+        // bloat the struct to 48 bytes, mismatching wgpu's
+        // min_binding_size. See the comment on PostUniform itself.
+        assert_eq!(std::mem::size_of::<PostUniform>(), 32);
     }
 }
