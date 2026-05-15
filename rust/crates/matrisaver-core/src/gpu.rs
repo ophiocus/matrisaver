@@ -68,7 +68,9 @@ struct ScreenVertex {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct GlobalUniform {
     inv_size: [f32; 2],
-    _pad: [f32; 2],
+    /// `.0` = animation_seconds (drives the head-glyph specular sheen).
+    /// `.1` is still spare padding.
+    time_pad: [f32; 2],
     glyph_tint: [f32; 4],
     style_params: [f32; 4],
 }
@@ -78,11 +80,32 @@ struct GlobalUniform {
 struct PostUniform {
     texel_size: [f32; 2],
     threshold: f32,
-    _pad0: f32,
-    direction: [f32; 2],
     intensity: f32,
+    /// 0.0 = plain box downsample, 1.0 = first-downsample (Karis
+    /// luma-weighted average + soft-knee HDR threshold), 2.0 = upsample.
+    /// The separable-blur `direction` field is gone — mip-chain bloom
+    /// doesn't need it.
+    mode: f32,
+    // Three scalar pads (not a `vec3<f32>`) because in WGSL's uniform
+    // address space `vec3<f32>` aligns to 16 and would force the struct
+    // to 48 bytes, mismatching this 32-byte Rust layout. Scalar f32
+    // fields keep the struct at a clean 32 bytes in both worlds.
+    _pad0: f32,
     _pad1: f32,
+    _pad2: f32,
 }
+
+/// Number of bloom mip levels. Mip 0 is `surface / downsample_factor`,
+/// each subsequent mip halves both dimensions. 5 levels at base 1/2
+/// gives sizes 1/2, 1/4, 1/8, 1/16, 1/32 — wide enough for the soft
+/// phosphor halo the 1999 grade wants.
+const BLOOM_MIP_COUNT: u32 = 5;
+
+/// HDR storage format for scene, persistence, and bloom textures.
+/// Rgba16Float gives ~5 stops of headroom above display range so
+/// super-bright head glyphs have room to be "actually bright" before
+/// tone mapping crushes them back to 0..1 for the display surface.
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 const QUAD_VERTICES: [QuadVertex; 6] = [
     QuadVertex {
@@ -143,10 +166,21 @@ struct CellRect {
 struct RenderTargets {
     _scene_texture: wgpu::Texture,
     scene_view: wgpu::TextureView,
-    _glow_a_texture: wgpu::Texture,
-    glow_a_view: wgpu::TextureView,
-    _glow_b_texture: wgpu::Texture,
-    glow_b_view: wgpu::TextureView,
+    // Mip-chain bloom: BLOOM_MIP_COUNT progressively-halved HDR
+    // textures. The downsample chain writes 0..N (each from the
+    // previous level), then the upsample chain blends additively from
+    // N-1..0. Final bloom result lives in `bloom_views[0]`.
+    _bloom_textures: Vec<wgpu::Texture>,
+    bloom_views: Vec<wgpu::TextureView>,
+    bloom_sizes: Vec<(u32, u32)>,
+    // Phosphor-persistence ping-pong pair. Full-size HDR; one is read
+    // as "previous frame", the other written as "this frame", swapped
+    // via GpuRendererScaffold::persist_toggle. Recreated on resize,
+    // which harmlessly resets the trail.
+    _persist_a_texture: wgpu::Texture,
+    persist_a_view: wgpu::TextureView,
+    _persist_b_texture: wgpu::Texture,
+    persist_b_view: wgpu::TextureView,
     _target_texture: wgpu::Texture,
     target_view: wgpu::TextureView,
 }
@@ -156,12 +190,31 @@ pub struct GpuRendererScaffold {
     device: wgpu::Device,
     queue: wgpu::Queue,
     glyph_pipeline: wgpu::RenderPipeline,
-    prefilter_pipeline: wgpu::RenderPipeline,
-    blur_pipeline: wgpu::RenderPipeline,
+    /// First-level downsample: Karis luma weighting + soft-knee HDR
+    /// threshold. Reads full-size persist_curr, writes bloom mip 0.
+    bloom_first_pipeline: wgpu::RenderPipeline,
+    /// Plain box downsample. Reads bloom mip i-1, writes bloom mip i.
+    bloom_downsample_pipeline: wgpu::RenderPipeline,
+    /// Tent-filter upsample with additive blend. Reads bloom mip i+1,
+    /// blends additively into bloom mip i.
+    bloom_upsample_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
+    persistence_pipeline: wgpu::RenderPipeline,
+    /// Ping-pong selector for the two persist buffers. `false` → A is
+    /// this frame's write target (B is last frame's read source);
+    /// flipped at the end of every `draw_instanced_pass`.
+    persist_toggle: bool,
     global_bind_group: wgpu::BindGroup,
     global_buffer: wgpu::Buffer,
-    post_buffer: wgpu::Buffer,
+    /// One small (32-byte) PostUniform buffer per bloom pass —
+    /// `2 * BLOOM_MIP_COUNT - 1` entries: 1 first-downsample, then
+    /// `BLOOM_MIP_COUNT - 1` plain downsamples, then `BLOOM_MIP_COUNT - 1`
+    /// upsamples. Separate buffers are required because `queue.write_buffer`
+    /// calls between render passes in the same submission all flush
+    /// before any pass executes — only the *last* write would be
+    /// observable if we reused a single buffer. Separate destinations
+    /// sidestep that wgpu semantic entirely.
+    bloom_post_buffers: Vec<wgpu::Buffer>,
     atlas_bind_group: wgpu::BindGroup,
     quad_vertex_buffer: wgpu::Buffer,
     screen_vertex_buffer: wgpu::Buffer,
@@ -284,7 +337,7 @@ impl GpuRendererScaffold {
                     "
                     struct Globals {
                         inv_size: vec2<f32>,
-                        _pad: vec2<f32>,
+                        time_pad: vec2<f32>,
                         glyph_tint: vec4<f32>,
                         style_params: vec4<f32>,
                     };
@@ -356,7 +409,28 @@ impl GpuRendererScaffold {
                         let base_color = globals.glyph_tint.rgb;
                         let head_color = mix(base_color, vec3<f32>(0.86, 1.0, 0.92), head_mix);
                         let ghost_color = mix(base_color * 0.28, vec3<f32>(0.08, 0.22, 0.14), 0.35);
-                        let color = mix(head_color, ghost_color, is_ghost);
+
+                        // Specular sheen on head glyphs — a tight diagonal
+                        // highlight band raking across the glyph, time-driven,
+                        // gated by head_mix so only leading heads chrome up.
+                        // (uv.x + uv.y) is the diagonal coordinate; pow() tightens
+                        // the band; the cool-white tint reads as liquid-mirror
+                        // rather than merely a brighter green.
+                        let sheen_phase = (input.uv.x + input.uv.y) * 3.0 - globals.time_pad.x * 2.2;
+                        let sheen_band = pow(max(sin(sheen_phase) * 0.5 + 0.5, 0.0), 6.0);
+                        let sheen = sheen_band * head_mix * 0.6;
+                        let head_sheened = head_color + vec3<f32>(0.55, 0.72, 0.62) * sheen;
+
+                        // HDR head boost — head glyphs emit super-bright
+                        // luminance into the Rgba16Float scene buffer so
+                        // the mip-chain bloom has real headroom to grow
+                        // a wide soft halo. head_mix gates this so only
+                        // leading heads crank up; trails stay near 1.0
+                        // and don't blow out the bloom.
+                        let head_hdr_scale = 1.0 + head_mix * 3.0;
+                        let head_emissive = head_sheened * head_hdr_scale;
+
+                        let color = mix(head_emissive, ghost_color, is_ghost);
                         let alpha_scale = mix(1.0, globals.style_params.z, is_ghost);
                         let grain = 0.95 + input.grain * 0.08;
                         return vec4<f32>(color * value_final * grain * alpha_scale, 1.0);
@@ -366,17 +440,31 @@ impl GpuRendererScaffold {
                 ),
             });
 
-        let post_filter_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("matrisaver-scaffold-post-filter-shader"),
+        // Mip-chain bloom shader (replaces the old prefilter + separable
+        // blur). Three fragment entry points:
+        //   - fs_first_downsample: Karis luma-weighted 13-tap average
+        //     plus soft-knee HDR threshold. Run once, reads full-size
+        //     persist_curr, writes bloom mip 0. The Karis weighting
+        //     kills HDR fireflies that would otherwise survive into
+        //     every subsequent mip and bloom unnaturally.
+        //   - fs_downsample: plain 13-tap downsample (Call of Duty:
+        //     Advanced Warfare technique, per LearnOpenGL's
+        //     physically-based bloom article). Run on mips 1..N.
+        //   - fs_upsample: 9-tap tent filter. Run on mips N-1..0 with
+        //     additive blend at the pipeline level so each level adds
+        //     to the one below for smooth wide falloff.
+        let bloom_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("matrisaver-scaffold-bloom-shader"),
                 source: wgpu::ShaderSource::Wgsl(
                     "
                     struct PostUniform {
                         texel_size: vec2<f32>,
                         threshold: f32,
-                        _pad0: f32,
-                        direction: vec2<f32>,
                         intensity: f32,
+                        mode: f32,
+                        _pad0: f32,
                         _pad1: f32,
+                        _pad2: f32,
                     };
 
                     @group(0) @binding(0)
@@ -405,23 +493,114 @@ impl GpuRendererScaffold {
                         return output;
                     }
 
-                    @fragment
-                    fn fs_prefilter(input: VertexOut) -> @location(0) vec4<f32> {
-                        let base = textureSample(src_tex, src_sampler, input.uv).rgb;
-                        let right = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(post.texel_size.x, 0.0)).rgb;
-                        let down = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(0.0, post.texel_size.y)).rgb;
-                        let avg = (base + right + down) / 3.0;
-                        let luminance = dot(avg, vec3<f32>(0.2126, 0.7152, 0.0722));
-                        let boosted = max(luminance - post.threshold, 0.0);
-                        return vec4<f32>(avg * boosted * post.intensity, 1.0);
+                    // Karis average: weight each tap by 1/(1+luma) to
+                    // pull the average toward dim taps, which prevents
+                    // a single super-bright HDR pixel from dominating
+                    // the box and surviving into deeper mips as a
+                    // sparkling 'firefly'.
+                    fn karis_weight(c: vec3<f32>) -> f32 {
+                        let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+                        return 1.0 / (1.0 + luma);
+                    }
+
+                    // 13-tap downsample (CoD:AW). Samples a 4x4 region as
+                    // four 2x2 sub-averages plus a center cluster, then
+                    // weights them so the result has minimal aliasing
+                    // when feeding the next mip down.
+                    fn downsample_13_tap(uv: vec2<f32>, texel: vec2<f32>, karis: bool) -> vec3<f32> {
+                        let a = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-2.0, -2.0)).rgb;
+                        let b = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 0.0, -2.0)).rgb;
+                        let c = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 2.0, -2.0)).rgb;
+                        let d = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-2.0,  0.0)).rgb;
+                        let e = textureSample(src_tex, src_sampler, uv).rgb;
+                        let f = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 2.0,  0.0)).rgb;
+                        let g = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-2.0,  2.0)).rgb;
+                        let h = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 0.0,  2.0)).rgb;
+                        let i = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 2.0,  2.0)).rgb;
+                        let j = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-1.0, -1.0)).rgb;
+                        let k = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 1.0, -1.0)).rgb;
+                        let l = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>(-1.0,  1.0)).rgb;
+                        let m = textureSample(src_tex, src_sampler, uv + texel * vec2<f32>( 1.0,  1.0)).rgb;
+
+                        if (karis) {
+                            // First mip — partition into 5 groups and apply
+                            // per-group Karis weighting before combining.
+                            let g0 = (a + b + d + e) * 0.25;
+                            let g1 = (b + c + e + f) * 0.25;
+                            let g2 = (d + e + g + h) * 0.25;
+                            let g3 = (e + f + h + i) * 0.25;
+                            let g4 = (j + k + l + m) * 0.25;
+                            let w0 = karis_weight(g0);
+                            let w1 = karis_weight(g1);
+                            let w2 = karis_weight(g2);
+                            let w3 = karis_weight(g3);
+                            let w4 = karis_weight(g4);
+                            // Group 4 (the center cluster) weighted 0.5,
+                            // outer corners 0.125 each — matches the CoD
+                            // recipe's energy distribution.
+                            let sum = g0 * w0 * 0.125 + g1 * w1 * 0.125
+                                   + g2 * w2 * 0.125 + g3 * w3 * 0.125
+                                   + g4 * w4 * 0.5;
+                            let wsum = w0 * 0.125 + w1 * 0.125
+                                     + w2 * 0.125 + w3 * 0.125 + w4 * 0.5;
+                            return sum / max(wsum, 0.0001);
+                        }
+
+                        // Deeper mips — straight weighted average.
+                        return e * 0.125
+                             + (a + c + g + i) * 0.03125
+                             + (b + d + f + h) * 0.0625
+                             + (j + k + l + m) * 0.125;
+                    }
+
+                    // Soft-knee HDR threshold (Unreal-style). Linear
+                    // threshold has a hard cutoff that flickers; the
+                    // knee fades pixels in over a half-stop window.
+                    fn soft_threshold(color: vec3<f32>, threshold: f32) -> vec3<f32> {
+                        let knee = threshold * 0.5;
+                        let luma = max(color.r, max(color.g, color.b));
+                        let soft = clamp(luma - threshold + knee, 0.0, 2.0 * knee);
+                        let soft_factor = soft * soft / max(4.0 * knee * knee, 0.0001);
+                        let contrib = max(luma - threshold, soft_factor) / max(luma, 0.0001);
+                        return color * contrib;
                     }
 
                     @fragment
-                    fn fs_blur(input: VertexOut) -> @location(0) vec4<f32> {
-                        let center = textureSample(src_tex, src_sampler, input.uv).rgb * 0.4;
-                        let tap_a = textureSample(src_tex, src_sampler, input.uv + post.direction * post.texel_size * 1.5).rgb * 0.3;
-                        let tap_b = textureSample(src_tex, src_sampler, input.uv - post.direction * post.texel_size * 1.5).rgb * 0.3;
-                        return vec4<f32>(center + tap_a + tap_b, 1.0);
+                    fn fs_first_downsample(input: VertexOut) -> @location(0) vec4<f32> {
+                        let sampled = downsample_13_tap(input.uv, post.texel_size, true);
+                        let bloomed = soft_threshold(sampled, post.threshold) * post.intensity;
+                        return vec4<f32>(bloomed, 1.0);
+                    }
+
+                    @fragment
+                    fn fs_downsample(input: VertexOut) -> @location(0) vec4<f32> {
+                        let sampled = downsample_13_tap(input.uv, post.texel_size, false);
+                        return vec4<f32>(sampled, 1.0);
+                    }
+
+                    // 9-tap tent filter upsample. Each call samples a
+                    // small 3x3 neighborhood from the smaller mip above
+                    // and writes additively into the larger mip below
+                    // (additive blend is on the pipeline). Compounding
+                    // these calls produces the wide soft falloff that
+                    // reads as phosphor wash rather than a Gaussian
+                    // halo.
+                    @fragment
+                    fn fs_upsample(input: VertexOut) -> @location(0) vec4<f32> {
+                        let t = post.texel_size;
+                        let a = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(-t.x, -t.y)).rgb;
+                        let b = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( 0.0, -t.y)).rgb;
+                        let c = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( t.x, -t.y)).rgb;
+                        let d = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(-t.x,  0.0)).rgb;
+                        let e = textureSample(src_tex, src_sampler, input.uv).rgb;
+                        let f = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( t.x,  0.0)).rgb;
+                        let g = textureSample(src_tex, src_sampler, input.uv + vec2<f32>(-t.x,  t.y)).rgb;
+                        let h = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( 0.0,  t.y)).rgb;
+                        let i = textureSample(src_tex, src_sampler, input.uv + vec2<f32>( t.x,  t.y)).rgb;
+                        let tent = e * 0.25
+                                 + (b + d + f + h) * 0.125
+                                 + (a + c + g + i) * 0.0625;
+                        return vec4<f32>(tent * post.intensity, 1.0);
                     }
                     "
                     .into(),
@@ -458,12 +637,89 @@ impl GpuRendererScaffold {
                         return output;
                     }
 
+                    // ACES filmic tone map — Krzysztof Narkowicz's
+                    // approximation. Preserves the institutional green
+                    // character of the 1999 grade in highlights better
+                    // than Reinhard, which would desaturate toward
+                    // white. Folds the open-ended HDR range into the
+                    // display's 0..1 with a filmic shoulder.
+                    fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+                        let a = 2.51;
+                        let b = 0.03;
+                        let c = 2.43;
+                        let d = 0.59;
+                        let e = 0.14;
+                        return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+                    }
+
                     @fragment
                     fn fs_composite(input: VertexOut) -> @location(0) vec4<f32> {
                         let scene = textureSample(scene_tex, mix_sampler, input.uv).rgb;
                         let glow = textureSample(glow_tex, mix_sampler, input.uv).rgb;
-                        let color = scene + glow * 0.9;
-                        return vec4<f32>(color, 1.0);
+                        // Combine HDR scene + HDR bloom in linear space,
+                        // then tone-map once at the end. Bloom intensity
+                        // is part of the bloom upsample now (post.intensity);
+                        // here we apply a final compositing weight.
+                        let hdr = scene + glow * 0.9;
+                        var color = aces_tonemap(hdr);
+                        // Crush blacks — 1999 Matrix chiaroscuro look. Pull
+                        // the toe to true black so the institutional green
+                        // sits on a void rather than a muddy near-black,
+                        // then a tiny gain to compensate for the floor lift.
+                        color = max(color - vec3<f32>(0.018, 0.018, 0.018), vec3<f32>(0.0));
+                        color = color * 1.05;
+                        return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+                    }
+                    "
+                .into(),
+            ),
+        });
+
+        // Phosphor-persistence pass. Reads the freshly-drawn scene plus
+        // the previous frame's persisted buffer; emits max(scene,
+        // prev * decay). max() (not additive accumulation) is the
+        // phosphor model — bright glyphs persist and decay, dark
+        // regions don't runaway-brighten. Bind layout is identical to
+        // the composite pass (two textures + sampler), so it reuses
+        // composite_layout. Decay is a shader constant — no uniform,
+        // which sidesteps any post_buffer write-ordering question.
+        let post_persistence_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("matrisaver-scaffold-post-persistence-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                "
+                    @group(0) @binding(0)
+                    var scene_tex: texture_2d<f32>;
+
+                    @group(0) @binding(1)
+                    var prev_tex: texture_2d<f32>;
+
+                    @group(0) @binding(2)
+                    var persist_sampler: sampler;
+
+                    struct VertexIn {
+                        @location(0) pos: vec2<f32>,
+                    };
+
+                    struct VertexOut {
+                        @builtin(position) clip_position: vec4<f32>,
+                        @location(0) uv: vec2<f32>,
+                    };
+
+                    @vertex
+                    fn vs_screen(input: VertexIn) -> VertexOut {
+                        var output: VertexOut;
+                        output.clip_position = vec4<f32>(input.pos, 0.0, 1.0);
+                        output.uv = input.pos * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+                        return output;
+                    }
+
+                    @fragment
+                    fn fs_persist(input: VertexOut) -> @location(0) vec4<f32> {
+                        let decay = 0.86;
+                        let scene = textureSample(scene_tex, persist_sampler, input.uv).rgb;
+                        let prev = textureSample(prev_tex, persist_sampler, input.uv).rgb;
+                        let persisted = max(scene, prev * decay);
+                        return vec4<f32>(persisted, 1.0);
                     }
                     "
                 .into(),
@@ -490,7 +746,7 @@ impl GpuRendererScaffold {
             label: Some("matrisaver-scaffold-global-buffer"),
             contents: bytemuck::bytes_of(&GlobalUniform {
                 inv_size: [2.0 / width.max(1) as f32, 2.0 / height.max(1) as f32],
-                _pad: [0.0; 2],
+                time_pad: [0.0; 2],
                 glyph_tint: [0.0, 1.0, 0.35, 1.0],
                 style_params: [1.0, 1.0, 0.48, 0.0],
             }),
@@ -506,18 +762,19 @@ impl GpuRendererScaffold {
             }],
         });
 
-        let post_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("matrisaver-scaffold-post-buffer"),
-            contents: bytemuck::bytes_of(&PostUniform {
-                texel_size: [1.0 / width.max(1) as f32, 1.0 / height.max(1) as f32],
-                threshold: 0.45,
-                _pad0: 0.0,
-                direction: [1.0, 0.0],
-                intensity: 1.0,
-                _pad1: 0.0,
-            }),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        // One PostUniform buffer per bloom pass. 2*BLOOM_MIP_COUNT-1
+        // because we have 1 first-downsample, (BLOOM_MIP_COUNT-1)
+        // plain downsamples, and (BLOOM_MIP_COUNT-1) upsamples.
+        let bloom_pass_count = (2 * BLOOM_MIP_COUNT - 1) as usize;
+        let mut bloom_post_buffers: Vec<wgpu::Buffer> = Vec::with_capacity(bloom_pass_count);
+        for _ in 0..bloom_pass_count {
+            bloom_post_buffers.push(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("matrisaver-scaffold-bloom-post-buffer"),
+                size: std::mem::size_of::<PostUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
 
         let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("matrisaver-scaffold-atlas-layout"),
@@ -722,7 +979,7 @@ impl GpuRendererScaffold {
                 module: &glyph_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -741,73 +998,76 @@ impl GpuRendererScaffold {
             immediate_size: 0,
         });
 
-        let prefilter_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("matrisaver-scaffold-prefilter-pipeline"),
-            layout: Some(&post_layout),
-            vertex: wgpu::VertexState {
-                module: &post_filter_shader,
-                entry_point: Some("vs_screen"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ScreenVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 0,
-                        shader_location: 0,
+        // Helper closure to construct a bloom pipeline. Same vertex
+        // state, same layout, varying only by entry point and blend
+        // state (REPLACE for downsamples, additive for upsample).
+        let make_bloom_pipeline = |label: &str,
+                                   entry: &str,
+                                   blend: wgpu::BlendState|
+         -> wgpu::RenderPipeline {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&post_layout),
+                vertex: wgpu::VertexState {
+                    module: &bloom_shader,
+                    entry_point: Some("vs_screen"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<ScreenVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        }],
                     }],
-                }],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &post_filter_shader,
-                entry_point: Some("fs_prefilter"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &bloom_shader,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(blend),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
 
-        let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("matrisaver-scaffold-blur-pipeline"),
-            layout: Some(&post_layout),
-            vertex: wgpu::VertexState {
-                module: &post_filter_shader,
-                entry_point: Some("vs_screen"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ScreenVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
-                }],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+        let bloom_first_pipeline = make_bloom_pipeline(
+            "matrisaver-scaffold-bloom-first-pipeline",
+            "fs_first_downsample",
+            wgpu::BlendState::REPLACE,
+        );
+        let bloom_downsample_pipeline = make_bloom_pipeline(
+            "matrisaver-scaffold-bloom-downsample-pipeline",
+            "fs_downsample",
+            wgpu::BlendState::REPLACE,
+        );
+        // Additive blend (src + dst) on the upsample so each level's
+        // contribution stacks into the larger mip below it.
+        let bloom_upsample_pipeline = make_bloom_pipeline(
+            "matrisaver-scaffold-bloom-upsample-pipeline",
+            "fs_upsample",
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &post_filter_shader,
-                entry_point: Some("fs_blur"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         let composite_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("matrisaver-scaffold-composite-layout"),
@@ -849,6 +1109,42 @@ impl GpuRendererScaffold {
             cache: None,
         });
 
+        // Persistence pipeline — same bind-group layout as composite
+        // (two textures + sampler), different shader.
+        let persistence_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("matrisaver-scaffold-persistence-pipeline"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &post_persistence_shader,
+                entry_point: Some("vs_screen"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ScreenVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &post_persistence_shader,
+                entry_point: Some("fs_persist"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let _keep_alive = atlas_texture;
 
         Ok(Self {
@@ -856,12 +1152,15 @@ impl GpuRendererScaffold {
             device,
             queue,
             glyph_pipeline,
-            prefilter_pipeline,
-            blur_pipeline,
+            bloom_first_pipeline,
+            bloom_downsample_pipeline,
+            bloom_upsample_pipeline,
             composite_pipeline,
+            persistence_pipeline,
+            persist_toggle: false,
             global_bind_group,
             global_buffer,
-            post_buffer,
+            bloom_post_buffers,
             atlas_bind_group,
             quad_vertex_buffer,
             screen_vertex_buffer,
@@ -903,8 +1202,8 @@ impl GpuRendererScaffold {
         downsample_factor: u8,
     ) -> RenderTargets {
         let factor = downsample_factor.max(1) as u32;
-        let glow_width = (width / factor).max(1);
-        let glow_height = (height / factor).max(1);
+        let mip0_width = (width / factor).max(1);
+        let mip0_height = (height / factor).max(1);
 
         let scene_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("matrisaver-scaffold-scene"),
@@ -916,44 +1215,75 @@ impl GpuRendererScaffold {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: HDR_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let scene_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let glow_a_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("matrisaver-scaffold-glow-a"),
+        // Bloom mip chain — BLOOM_MIP_COUNT progressively halved HDR
+        // textures starting at (mip0_width, mip0_height).
+        let mut bloom_textures: Vec<wgpu::Texture> = Vec::with_capacity(BLOOM_MIP_COUNT as usize);
+        let mut bloom_views: Vec<wgpu::TextureView> = Vec::with_capacity(BLOOM_MIP_COUNT as usize);
+        let mut bloom_sizes: Vec<(u32, u32)> = Vec::with_capacity(BLOOM_MIP_COUNT as usize);
+        for level in 0..BLOOM_MIP_COUNT {
+            let level_width = (mip0_width >> level).max(1);
+            let level_height = (mip0_height >> level).max(1);
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("matrisaver-scaffold-bloom-mip"),
+                size: wgpu::Extent3d {
+                    width: level_width,
+                    height: level_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            bloom_textures.push(texture);
+            bloom_views.push(view);
+            bloom_sizes.push((level_width, level_height));
+        }
+
+        let persist_a_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("matrisaver-scaffold-persist-a"),
             size: wgpu::Extent3d {
-                width: glow_width,
-                height: glow_height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: HDR_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let glow_a_view = glow_a_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let persist_a_view = persist_a_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let glow_b_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("matrisaver-scaffold-glow-b"),
+        let persist_b_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("matrisaver-scaffold-persist-b"),
             size: wgpu::Extent3d {
-                width: glow_width,
-                height: glow_height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: HDR_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let glow_b_view = glow_b_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let persist_b_view = persist_b_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Display surface (LDR — the composite tone-maps to 0..1 before
+        // writing here).
         let target_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("matrisaver-scaffold-target"),
             size: wgpu::Extent3d {
@@ -975,10 +1305,13 @@ impl GpuRendererScaffold {
         RenderTargets {
             _scene_texture: scene_texture,
             scene_view,
-            _glow_a_texture: glow_a_texture,
-            glow_a_view,
-            _glow_b_texture: glow_b_texture,
-            glow_b_view,
+            _bloom_textures: bloom_textures,
+            bloom_views,
+            bloom_sizes,
+            _persist_a_texture: persist_a_texture,
+            persist_a_view,
+            _persist_b_texture: persist_b_texture,
+            persist_b_view,
             _target_texture: target_texture,
             target_view,
         }
@@ -1205,6 +1538,7 @@ impl GpuRendererScaffold {
         pipeline: &wgpu::RenderPipeline,
         bind_group: &wgpu::BindGroup,
         screen_vertex_buffer: &wgpu::Buffer,
+        load_op: wgpu::LoadOp<wgpu::Color>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("matrisaver-scaffold-post-pass"),
@@ -1213,12 +1547,7 @@ impl GpuRendererScaffold {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
-                    }),
+                    load: load_op,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -1239,6 +1568,7 @@ impl GpuRendererScaffold {
         downsample_factor: u8,
         glyph_tint: [f32; 3],
         style_params: [f32; 4],
+        time: f32,
     ) {
         if instances.is_empty() {
             return;
@@ -1255,7 +1585,7 @@ impl GpuRendererScaffold {
                     2.0 / self.surface_size.0.max(1) as f32,
                     2.0 / self.surface_size.1.max(1) as f32,
                 ],
-                _pad: [0.0; 2],
+                time_pad: [time, 0.0],
                 glyph_tint: [glyph_tint[0], glyph_tint[1], glyph_tint[2], 1.0],
                 style_params,
             }),
@@ -1264,10 +1594,6 @@ impl GpuRendererScaffold {
         let source_texel = [
             1.0 / self.surface_size.0.max(1) as f32,
             1.0 / self.surface_size.1.max(1) as f32,
-        ];
-        let glow_texel = [
-            1.0 / self.glow_size.0.max(1) as f32,
-            1.0 / self.glow_size.1.max(1) as f32,
         ];
 
         let mut encoder = self
@@ -1305,21 +1631,26 @@ impl GpuRendererScaffold {
             pass.draw(0..6, 0..instances.len() as u32);
         }
 
-        self.queue.write_buffer(
-            &self.post_buffer,
-            0,
-            bytemuck::bytes_of(&PostUniform {
-                texel_size: source_texel,
-                threshold: 0.45,
-                _pad0: 0.0,
-                direction: [0.0, 0.0],
-                intensity: 1.2,
-                _pad1: 0.0,
-            }),
-        );
-        let prefilter_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("matrisaver-scaffold-prefilter-bind-group"),
-            layout: &self.prefilter_pipeline.get_bind_group_layout(0),
+        // Phosphor-persistence pass. `curr` is this frame's write
+        // target; `prev` is last frame's persisted buffer (read).
+        // Everything downstream (prefilter, composite) then reads
+        // `curr` instead of the raw scene, so the glow and the final
+        // image both carry the decayed trail.
+        let persist_toggle = self.persist_toggle;
+        let (persist_curr_view, persist_prev_view) = if persist_toggle {
+            (
+                &self.render_targets.persist_b_view,
+                &self.render_targets.persist_a_view,
+            )
+        } else {
+            (
+                &self.render_targets.persist_a_view,
+                &self.render_targets.persist_b_view,
+            )
+        };
+        let persistence_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("matrisaver-scaffold-persistence-bind-group"),
+            layout: &self.persistence_pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1327,43 +1658,124 @@ impl GpuRendererScaffold {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                    resource: wgpu::BindingResource::TextureView(persist_prev_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.post_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
                 },
             ],
         });
         Self::draw_post_pass(
             &mut encoder,
-            &self.render_targets.glow_a_view,
-            &self.prefilter_pipeline,
-            &prefilter_bind_group,
+            persist_curr_view,
+            &self.persistence_pipeline,
+            &persistence_bind_group,
             &self.screen_vertex_buffer,
-        );
-
-        self.queue.write_buffer(
-            &self.post_buffer,
-            0,
-            bytemuck::bytes_of(&PostUniform {
-                texel_size: glow_texel,
-                threshold: 0.0,
-                _pad0: 0.0,
-                direction: [1.0, 0.0],
-                intensity: 1.0,
-                _pad1: 0.0,
+            wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
             }),
         );
-        let blur_horizontal_bind_group =
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("matrisaver-scaffold-blur-h-bind-group"),
-                layout: &self.blur_pipeline.get_bind_group_layout(0),
+
+        // -------- Mip-chain bloom --------
+        //
+        // Each bloom pass owns its own uniform buffer in
+        // `self.bloom_post_buffers`. Writing N values to N distinct
+        // buffers sidesteps wgpu's "all queue writes flush before any
+        // submit" semantic that would otherwise cause every pass to
+        // see only the last write's values.
+        let bloom_mip_count = BLOOM_MIP_COUNT as usize;
+        let downsample_count = bloom_mip_count - 1; // mips 1..N
+        let upsample_count = bloom_mip_count - 1; // mips N-2..0
+
+        // Index helpers into bloom_post_buffers / per-pass bind groups.
+        let first_idx: usize = 0;
+        let downsample_idx = |i: usize| 1 + i; // i in 0..downsample_count
+        let upsample_idx = |i: usize| 1 + downsample_count + i; // i in 0..upsample_count
+
+        // Stage 1: first downsample (Karis + soft-knee HDR threshold).
+        // Reads full-size persist_curr; texel = full-surface texel.
+        self.queue.write_buffer(
+            &self.bloom_post_buffers[first_idx],
+            0,
+            bytemuck::bytes_of(&PostUniform {
+                texel_size: source_texel,
+                // HDR threshold: heads emit ~4.0 luminance, trails near
+                // 1.0. Threshold 1.0 captures the genuine over-bright
+                // tips and ignores the trails so bloom is anchored on
+                // heads rather than smeared over everything.
+                threshold: 1.0,
+                intensity: 1.0,
+                mode: 1.0,
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
+            }),
+        );
+        let bg_first = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("matrisaver-scaffold-bloom-first-bind-group"),
+            layout: &self.bloom_first_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(persist_curr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.bloom_post_buffers[first_idx].as_entire_binding(),
+                },
+            ],
+        });
+        Self::draw_post_pass(
+            &mut encoder,
+            &self.render_targets.bloom_views[0],
+            &self.bloom_first_pipeline,
+            &bg_first,
+            &self.screen_vertex_buffer,
+            wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+        );
+
+        // Stage 2: plain downsamples for mips 1..N.
+        // (Bind groups must outlive the encoder.submit, so we collect
+        // them into a Vec rather than letting them drop mid-loop.)
+        let mut down_bind_groups: Vec<wgpu::BindGroup> = Vec::with_capacity(downsample_count);
+        for i in 0..downsample_count {
+            let src_level = i; // we read mip[i], write mip[i+1]
+            let (src_w, src_h) = self.render_targets.bloom_sizes[src_level];
+            let texel = [1.0 / src_w.max(1) as f32, 1.0 / src_h.max(1) as f32];
+            self.queue.write_buffer(
+                &self.bloom_post_buffers[downsample_idx(i)],
+                0,
+                bytemuck::bytes_of(&PostUniform {
+                    texel_size: texel,
+                    threshold: 0.0,
+                    intensity: 1.0,
+                    mode: 0.0,
+                    _pad0: 0.0,
+                    _pad1: 0.0,
+                    _pad2: 0.0,
+                }),
+            );
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("matrisaver-scaffold-bloom-down-bind-group"),
+                layout: &self.bloom_downsample_pipeline.get_bind_group_layout(0),
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
                         resource: wgpu::BindingResource::TextureView(
-                            &self.render_targets.glow_a_view,
+                            &self.render_targets.bloom_views[src_level],
                         ),
                     },
                     wgpu::BindGroupEntry {
@@ -1372,67 +1784,108 @@ impl GpuRendererScaffold {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: self.post_buffer.as_entire_binding(),
+                        resource: self.bloom_post_buffers[downsample_idx(i)]
+                            .as_entire_binding(),
                     },
                 ],
             });
-        Self::draw_post_pass(
-            &mut encoder,
-            &self.render_targets.glow_b_view,
-            &self.blur_pipeline,
-            &blur_horizontal_bind_group,
-            &self.screen_vertex_buffer,
-        );
+            down_bind_groups.push(bg);
+        }
+        for (i, bind_group) in down_bind_groups.iter().enumerate() {
+            let dst_level = i + 1;
+            Self::draw_post_pass(
+                &mut encoder,
+                &self.render_targets.bloom_views[dst_level],
+                &self.bloom_downsample_pipeline,
+                bind_group,
+                &self.screen_vertex_buffer,
+                wgpu::LoadOp::Clear(wgpu::Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+            );
+        }
 
-        self.queue.write_buffer(
-            &self.post_buffer,
-            0,
-            bytemuck::bytes_of(&PostUniform {
-                texel_size: glow_texel,
-                threshold: 0.0,
-                _pad0: 0.0,
-                direction: [0.0, 1.0],
-                intensity: 1.0,
-                _pad1: 0.0,
-            }),
-        );
-        let blur_vertical_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("matrisaver-scaffold-blur-v-bind-group"),
-            layout: &self.blur_pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.render_targets.glow_b_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.post_buffer.as_entire_binding(),
-                },
-            ],
-        });
-        Self::draw_post_pass(
-            &mut encoder,
-            &self.render_targets.glow_a_view,
-            &self.blur_pipeline,
-            &blur_vertical_bind_group,
-            &self.screen_vertex_buffer,
-        );
+        // Stage 3: upsamples — for each pair (src=i+1, dst=i) from
+        // deepest to shallowest, tent-filter src and additively blend
+        // onto dst. LoadOp::Load preserves dst's downsample content;
+        // additive blend (pipeline state) sums new + existing.
+        let mut up_bind_groups: Vec<wgpu::BindGroup> = Vec::with_capacity(upsample_count);
+        for i in 0..upsample_count {
+            // We're going to process pairs in reverse: src=N-1->dst=N-2,
+            // src=N-2->dst=N-3, ..., src=1->dst=0. Loop index i runs
+            // 0..upsample_count, corresponding to dst = upsample_count-1-i.
+            let dst_level = upsample_count - 1 - i;
+            let src_level = dst_level + 1;
+            let (src_w, src_h) = self.render_targets.bloom_sizes[src_level];
+            let texel = [1.0 / src_w.max(1) as f32, 1.0 / src_h.max(1) as f32];
+            self.queue.write_buffer(
+                &self.bloom_post_buffers[upsample_idx(i)],
+                0,
+                bytemuck::bytes_of(&PostUniform {
+                    texel_size: texel,
+                    threshold: 0.0,
+                    // Per-step intensity — gentle, additive across
+                    // levels. The cumulative effect is what builds the
+                    // wide soft halo.
+                    intensity: 0.85,
+                    mode: 2.0,
+                    _pad0: 0.0,
+                    _pad1: 0.0,
+                    _pad2: 0.0,
+                }),
+            );
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("matrisaver-scaffold-bloom-up-bind-group"),
+                layout: &self.bloom_upsample_pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.render_targets.bloom_views[src_level],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.bloom_post_buffers[upsample_idx(i)]
+                            .as_entire_binding(),
+                    },
+                ],
+            });
+            up_bind_groups.push(bg);
+        }
+        for (i, bind_group) in up_bind_groups.iter().enumerate() {
+            let dst_level = upsample_count - 1 - i;
+            Self::draw_post_pass(
+                &mut encoder,
+                &self.render_targets.bloom_views[dst_level],
+                &self.bloom_upsample_pipeline,
+                bind_group,
+                &self.screen_vertex_buffer,
+                wgpu::LoadOp::Load,
+            );
+        }
 
+        // -------- Composite (HDR scene + HDR bloom → tone-mapped LDR) --------
         let composite_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("matrisaver-scaffold-composite-bind-group"),
             layout: &self.composite_pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.render_targets.scene_view),
+                    resource: wgpu::BindingResource::TextureView(persist_curr_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.render_targets.glow_a_view),
+                    resource: wgpu::BindingResource::TextureView(
+                        &self.render_targets.bloom_views[0],
+                    ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -1447,8 +1900,17 @@ impl GpuRendererScaffold {
             &self.composite_pipeline,
             &composite_bind_group,
             &self.screen_vertex_buffer,
+            wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
         );
 
         self.queue.submit([encoder.finish()]);
+
+        // Ping-pong: this frame's `curr` becomes next frame's `prev`.
+        self.persist_toggle = !persist_toggle;
     }
 }

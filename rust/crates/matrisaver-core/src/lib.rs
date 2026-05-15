@@ -164,12 +164,21 @@ pub mod config {
     pub const VARIANTS: [VariantConfig; 4] = [
         VariantConfig {
             key: "original",
+            // 1999 green calibration: a small red lift warms the pure
+            // (0,255,70) emerald toward the "institutional fluorescent /
+            // sickly digital" green Bill Pope graded the in-Matrix world
+            // to — and the blue drop kills the spring-green tint that was
+            // leaning too modern. Conservative on purpose; the heavily-
+            // pushed DVD "puke green" is the failure mode to avoid.
             name: "The Matrix (1999)",
-            color: (0, 255, 70),
+            color: (35, 235, 65),
             speed_range: (4, 10),
             density: 1.0,
             symbol_set: SymbolSet::KatakanaSymbols,
-            glow_color: (180, 255, 180),
+            // Softer, greener glow — less blown-white than the old
+            // (180,255,180), so the bloom reads as phosphor halo
+            // rather than a white wash.
+            glow_color: (120, 235, 140),
             pause_chance: 0.02,
             jitter_chance: 0.02,
             ghost_chance: 0.12,
@@ -772,6 +781,7 @@ impl CoreRuntime {
                 frame_plan.downsample_factor,
                 glyph_tint,
                 style_params,
+                self.animation_seconds,
             );
         }
         let draw_ms = draw_started.elapsed().as_secs_f64() * 1000.0;
@@ -945,7 +955,8 @@ mod tests {
         let variant = config::variant_by_key("original").expect("original variant is missing");
         let runtime = variant.to_runtime(22);
         assert_eq!(runtime.char_size, 22);
-        assert_eq!(runtime.color, (0, 255, 70));
+        // v0.3.0 1999 green calibration: (0,255,70) → (35,235,65).
+        assert_eq!(runtime.color, (35, 235, 65));
         assert_eq!(runtime.pipeline, config::Pipeline::OpenGl);
         assert!((runtime.density - 1.0).abs() < f32::EPSILON);
     }
@@ -957,7 +968,8 @@ mod tests {
             ..config::Settings::default()
         };
         let runtime = CoreRuntime::new(settings);
-        assert_eq!(runtime.runtime_config().color, (0, 255, 70));
+        // v0.3.0 1999 green calibration: (0,255,70) → (35,235,65).
+        assert_eq!(runtime.runtime_config().color, (35, 235, 65));
         assert_eq!(runtime.runtime_config().char_size, 22);
     }
 
