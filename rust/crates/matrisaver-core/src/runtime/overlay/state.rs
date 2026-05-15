@@ -12,8 +12,9 @@
 //      silhouette cells as they reach each target row.
 //   4. Post-reveal hold (overlay_dissolve_at set): NEW in v0.3.2.
 //      After all painting heads complete, the silhouette dwells
-//      with cells still frozen for OVERLAY_PERSIST_SECONDS so the
-//      user can actually see the finished image. Previously cleared
+//      with cells still frozen for `settings.overlay_persist_seconds`
+//      (admin-panel slider since v0.3.3, default 15s) so the user
+//      can actually see the finished image. Previously cleared
 //      locks the same frame the last head completed, so the
 //      fully-revealed silhouette was visible for ~one frame.
 //   5. Idle: waiting for overlay_next_trigger to fire, then inject.
@@ -63,7 +64,14 @@ impl CoreRuntime {
                 // *just now* fully visible. Enter post-reveal hold
                 // instead. clear_overlay_locks() will fire when
                 // overlay_dissolve_at elapses.
-                self.overlay_dissolve_at = Some(now + OVERLAY_PERSIST_SECONDS);
+                //
+                // v0.3.3: dwell time is `Settings.overlay_persist_seconds`,
+                // exposed as an admin-panel slider (range 0..120,
+                // default 15s). `.max(0.0)` guards against pathological
+                // negatives if a hand-edited settings.json sneaks past
+                // sanitize() with a NaN-then-clamp edge case.
+                self.overlay_dissolve_at =
+                    Some(now + self.settings.overlay_persist_seconds.max(0.0));
             }
             return;
         }

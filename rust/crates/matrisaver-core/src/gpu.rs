@@ -73,6 +73,13 @@ struct GlobalUniform {
     time_pad: [f32; 2],
     glyph_tint: [f32; 4],
     style_params: [f32; 4],
+    /// Visual-effects knobs exposed in the admin panel (v0.3.3).
+    /// `.x` = head_hdr_scale (HDR-emission multiplier for head glyphs;
+    /// glyph shader computes `head_scale = 1.0 + head_mix * .x`).
+    /// `.y .z .w` reserved for future knobs (composite glow weight,
+    /// phosphor decay, ACES exposure, etc.) — keep them zero for now
+    /// so the shader is forwards-compatible with older settings.
+    vfx_params: [f32; 4],
 }
 
 #[repr(C)]
@@ -109,13 +116,39 @@ struct PostUniform {
 // Cross-check the expectations with the WGSL `struct` declarations in
 // the shader sources — same number of bytes, same field order.
 const _: () = assert!(
-    std::mem::size_of::<GlobalUniform>() == 48,
-    "GlobalUniform must be 48 bytes — Rust struct layout drifted from the WGSL declaration"
+    std::mem::size_of::<GlobalUniform>() == 64,
+    "GlobalUniform must be 64 bytes — Rust struct layout drifted from the WGSL declaration"
 );
 const _: () = assert!(
     std::mem::size_of::<PostUniform>() == 32,
     "PostUniform must be 32 bytes — Rust struct layout drifted from the WGSL declaration"
 );
+
+/// Per-frame visual-effects parameters sourced from `Settings`. Bundled
+/// into a struct so the `draw_instanced_pass` signature stays readable
+/// as more knobs land — adding a knob means extending this struct, not
+/// growing the call site by another positional argument.
+///
+/// `head_hdr_scale` rides into `GlobalUniform.vfx_params.x` for the
+/// glyph shader. `bloom_threshold` and `bloom_intensity` ride into the
+/// per-pass `bloom_post_buffers` PostUniform writes (the first
+/// downsample and each upsample, respectively).
+#[derive(Debug, Clone, Copy)]
+pub struct VfxRenderParams {
+    pub head_hdr_scale: f32,
+    pub bloom_threshold: f32,
+    pub bloom_intensity: f32,
+}
+
+impl Default for VfxRenderParams {
+    fn default() -> Self {
+        Self {
+            head_hdr_scale: 1.5,
+            bloom_threshold: 0.7,
+            bloom_intensity: 0.85,
+        }
+    }
+}
 
 /// Number of bloom mip levels. Mip 0 is `surface / downsample_factor`,
 /// each subsequent mip halves both dimensions. 5 levels at base 1/2
@@ -187,6 +220,8 @@ const GLYPH_SHADER_WGSL: &str = "
         time_pad: vec2<f32>,
         glyph_tint: vec4<f32>,
         style_params: vec4<f32>,
+        // v0.3.3 VFX knobs — .x = head_hdr_scale.
+        vfx_params: vec4<f32>,
     };
 
     @group(0) @binding(0)
@@ -275,18 +310,14 @@ const GLYPH_SHADER_WGSL: &str = "
         // leading heads crank up; trails stay near 1.0
         // and don't blow out the bloom.
         //
-        // v0.3.2: head_mix multiplier dialed from 3.0 back to
-        // 1.5 (heads emit max 2.5 instead of 4.0). At 4.0 the
-        // ACES tone-map curve compressed mid-luminance trail
-        // values too aggressively against the bright-head pop,
-        // producing a 'no midtones, looks thresholded' artefact
-        // in overlay-painted silhouettes — heads near max
-        // display brightness, trails crushed into the toe.
-        // 2.5 keeps the bloom contribution comfortable (still
-        // above the threshold knee) without eating the
-        // perceived midrange. Paired with a lower bloom
-        // threshold so trails contribute to the glow too.
-        let head_hdr_scale = 1.0 + head_mix * 1.5;
+        // v0.3.3: the multiplier is now driven by
+        // globals.vfx_params.x (Settings.vfx_head_hdr_scale,
+        // exposed in the admin panel). v0.3.0 shipped at 3.0
+        // (heads at 4.0×) and produced a 'no midtones, looks
+        // thresholded' artefact via ACES toe compression;
+        // v0.3.2 reverted to a 1.5 default. Users who want the
+        // v0.3.0 'wild halo' look can dial the slider back up.
+        let head_hdr_scale = 1.0 + head_mix * globals.vfx_params.x;
         let head_emissive = head_sheened * head_hdr_scale;
 
         let color = mix(head_emissive, ghost_color, is_ghost);
@@ -789,6 +820,10 @@ impl GpuRendererScaffold {
                 time_pad: [0.0; 2],
                 glyph_tint: [0.0, 1.0, 0.35, 1.0],
                 style_params: [1.0, 1.0, 0.48, 0.0],
+                // Initial buffer holds the v0.3.2 defaults; the per-frame
+                // write in draw_instanced_pass replaces these with the
+                // live Settings values from the caller.
+                vfx_params: [1.5, 0.0, 0.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1607,6 +1642,7 @@ impl GpuRendererScaffold {
         glyph_tint: [f32; 3],
         style_params: [f32; 4],
         time: f32,
+        vfx: VfxRenderParams,
     ) {
         if instances.is_empty() {
             return;
@@ -1626,6 +1662,7 @@ impl GpuRendererScaffold {
                 time_pad: [time, 0.0],
                 glyph_tint: [glyph_tint[0], glyph_tint[1], glyph_tint[2], 1.0],
                 style_params,
+                vfx_params: [vfx.head_hdr_scale, 0.0, 0.0, 0.0],
             }),
         );
 
@@ -1741,15 +1778,12 @@ impl GpuRendererScaffold {
             0,
             bytemuck::bytes_of(&PostUniform {
                 texel_size: source_texel,
-                // HDR threshold: with v0.3.2's head_hdr_scale capped
-                // at 2.5, heads emit ~2.5 luminance; trails sit near
-                // 1.0. Threshold 0.7 (with soft-knee at 0.35 in the
-                // shader's `knee = threshold * 0.5`) lets bright
-                // trails contribute partially to the bloom and full
-                // heads contribute strongly. Bloom now fills in the
-                // perceived midrange the v0.3.0 threshold=1.0 was
-                // killing.
-                threshold: 0.7,
+                // HDR threshold: read from Settings.vfx_bloom_threshold
+                // (admin-panel slider, default 0.7). The shader applies
+                // a soft knee at half-threshold so the cutoff fades
+                // smoothly. Lower values = more glow + softer roll-off;
+                // higher values = head-only, sharper.
+                threshold: vfx.bloom_threshold,
                 intensity: 1.0,
                 mode: 1.0,
                 _pad0: 0.0,
@@ -1868,10 +1902,12 @@ impl GpuRendererScaffold {
                 bytemuck::bytes_of(&PostUniform {
                     texel_size: texel,
                     threshold: 0.0,
-                    // Per-step intensity — gentle, additive across
-                    // levels. The cumulative effect is what builds the
-                    // wide soft halo.
-                    intensity: 0.85,
+                    // Per-step intensity — additive across upsample
+                    // levels; the cumulative effect across all 4
+                    // upsamples is what builds the wide soft halo.
+                    // Read from Settings.vfx_bloom_intensity (admin-
+                    // panel slider, default 0.85).
+                    intensity: vfx.bloom_intensity,
                     mode: 2.0,
                     _pad0: 0.0,
                     _pad1: 0.0,
@@ -2005,8 +2041,11 @@ mod tests {
     // size assertion below trips before pipeline creation does.
     #[test]
     fn uniform_struct_sizes_match_wgsl_declarations() {
-        // GlobalUniform: vec2 + vec2 + vec4 + vec4 = 8+8+16+16 = 48 bytes.
-        assert_eq!(std::mem::size_of::<GlobalUniform>(), 48);
+        // GlobalUniform: vec2 + vec2 + vec4 + vec4 + vec4
+        //              = 8 + 8 + 16 + 16 + 16 = 64 bytes.
+        // The trailing vec4 is `vfx_params` (v0.3.3) carrying
+        // head_hdr_scale in `.x` for the glyph shader.
+        assert_eq!(std::mem::size_of::<GlobalUniform>(), 64);
 
         // PostUniform: vec2 + f32*5 + vec3-of-pad-as-3-scalars
         //            = 8 + 4 + 4 + 4 + 4 + 4 + 4 = 32 bytes.

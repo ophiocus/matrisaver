@@ -318,6 +318,50 @@ pub mod config {
         /// ASCII-conversion practice).
         #[serde(default)]
         pub overlay_auto_levels: bool,
+        // ── Visual-effects knobs (v0.3.3) ────────────────────────────
+        //
+        // Exposed in the admin panel after v0.3.0/v0.3.1/v0.3.2 made
+        // the HDR + mip-chain-bloom + overlay-dwell defaults visible.
+        // Each #[serde(default = "...")] uses a named default fn so
+        // older settings.json files that predate these fields keep
+        // working and pick up the new defaults silently.
+        /// Head-glyph HDR brightness multiplier. The glyph shader
+        /// emits `(1.0 + head_mix * vfx_head_hdr_scale)` × base color
+        /// for head glyphs — heads at full head_mix end up
+        /// `1.0 + this` times brighter than trails. Bigger values
+        /// crank the bloom halo around heads; too big crushes the
+        /// midtones via the ACES tone-map shoulder.
+        ///
+        /// Default: 1.5. v0.3.0 shipped at 3.0 (heads at 4.0×) and
+        /// produced the "no midtones / looks thresholded" artefact
+        /// in overlay silhouettes. v0.3.2 dialled back to 1.5.
+        #[serde(default = "default_vfx_head_hdr_scale")]
+        pub vfx_head_hdr_scale: f32,
+        /// Bloom prefilter threshold (HDR linear). HDR pixels above
+        /// this value contribute to the bloom; the shader applies a
+        /// soft knee at half the threshold so the cutoff fades.
+        /// Lower = more glow, fuzzier; higher = sharper, head-only.
+        ///
+        /// Default: 0.7. v0.3.0 shipped at 1.0 (head-only).
+        #[serde(default = "default_vfx_bloom_threshold")]
+        pub vfx_bloom_threshold: f32,
+        /// Per-upsample additive intensity in the mip-chain bloom.
+        /// Each upsample pass writes `tent_filter(src) * intensity`
+        /// additively onto the larger mip below. Bigger = stronger
+        /// glow at every level (compounds across 4 upsamples).
+        ///
+        /// Default: 0.85.
+        #[serde(default = "default_vfx_bloom_intensity")]
+        pub vfx_bloom_intensity: f32,
+        /// Post-reveal dwell time, in seconds. After the overlay
+        /// painting heads finish, the silhouette stays frozen for
+        /// this long before normal rain washes back over it. v0.3.2
+        /// introduced this; without it, the silhouette dissolved
+        /// within one frame of completing.
+        ///
+        /// Default: 15.0.
+        #[serde(default = "default_overlay_persist_seconds")]
+        pub overlay_persist_seconds: f32,
     }
 
     impl Default for Settings {
@@ -339,12 +383,32 @@ pub mod config {
                 char_size: 22,
                 overlay_directories: Vec::new(),
                 overlay_auto_levels: false,
+                vfx_head_hdr_scale: default_vfx_head_hdr_scale(),
+                vfx_bloom_threshold: default_vfx_bloom_threshold(),
+                vfx_bloom_intensity: default_vfx_bloom_intensity(),
+                overlay_persist_seconds: default_overlay_persist_seconds(),
             }
         }
     }
 
     fn default_glow_quality() -> GlowQuality {
         GlowQuality::Balanced
+    }
+
+    // v0.3.3 VFX/overlay knob defaults — named functions so #[serde(default = "...")]
+    // can adopt them, which lets pre-v0.3.3 settings.json files load without
+    // explicit values for these fields.
+    fn default_vfx_head_hdr_scale() -> f32 {
+        1.5
+    }
+    fn default_vfx_bloom_threshold() -> f32 {
+        0.7
+    }
+    fn default_vfx_bloom_intensity() -> f32 {
+        0.85
+    }
+    fn default_overlay_persist_seconds() -> f32 {
+        15.0
     }
 
     impl Settings {
@@ -358,6 +422,26 @@ pub mod config {
                 !src.path.as_os_str().is_empty()
                     && src.path.file_name().is_some_and(|n| !n.is_empty())
             });
+            // VFX knobs — clamp to sane envelopes. Values outside these
+            // ranges produce visual artefacts (uniform overflow, bloom
+            // saturation, NaN propagation from negative intensities)
+            // rather than improved visuals.
+            if !self.vfx_head_hdr_scale.is_finite() {
+                self.vfx_head_hdr_scale = default_vfx_head_hdr_scale();
+            }
+            self.vfx_head_hdr_scale = self.vfx_head_hdr_scale.clamp(0.0, 4.0);
+            if !self.vfx_bloom_threshold.is_finite() {
+                self.vfx_bloom_threshold = default_vfx_bloom_threshold();
+            }
+            self.vfx_bloom_threshold = self.vfx_bloom_threshold.clamp(0.0, 3.0);
+            if !self.vfx_bloom_intensity.is_finite() {
+                self.vfx_bloom_intensity = default_vfx_bloom_intensity();
+            }
+            self.vfx_bloom_intensity = self.vfx_bloom_intensity.clamp(0.0, 2.0);
+            if !self.overlay_persist_seconds.is_finite() {
+                self.overlay_persist_seconds = default_overlay_persist_seconds();
+            }
+            self.overlay_persist_seconds = self.overlay_persist_seconds.clamp(0.0, 120.0);
             self
         }
     }
@@ -677,7 +761,8 @@ pub struct CoreRuntime {
     /// point `clear_overlay_locks()` fires and normal rain resumes.
     /// Without this, the painting heads completing immediately tore
     /// down the silhouette — the user never got to dwell on the
-    /// fully-revealed image. See OVERLAY_PERSIST_SECONDS.
+    /// fully-revealed image. The dwell duration is the admin-panel-
+    /// tunable `Settings.overlay_persist_seconds`.
     overlay_dissolve_at: Option<f32>,
     overlay_locked_cells: Vec<(usize, usize)>,
     overlay_image_cursor: usize,
@@ -791,6 +876,11 @@ impl CoreRuntime {
                 glyph_tint,
                 style_params,
                 self.animation_seconds,
+                gpu::VfxRenderParams {
+                    head_hdr_scale: self.settings.vfx_head_hdr_scale,
+                    bloom_threshold: self.settings.vfx_bloom_threshold,
+                    bloom_intensity: self.settings.vfx_bloom_intensity,
+                },
             );
         }
         let draw_ms = draw_started.elapsed().as_secs_f64() * 1000.0;
@@ -1011,6 +1101,12 @@ mod tests {
                 write_ascii_alongside: true,
             }],
             overlay_auto_levels: true,
+            // v0.3.3 VFX/overlay knobs — exercise non-default values so
+            // serde round-trip is verified for the new fields too.
+            vfx_head_hdr_scale: 2.2,
+            vfx_bloom_threshold: 0.55,
+            vfx_bloom_intensity: 1.1,
+            overlay_persist_seconds: 22.5,
         };
         storage::save_settings(&settings, Some(&path)).expect("save settings failed");
 

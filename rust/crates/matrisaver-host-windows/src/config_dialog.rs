@@ -262,10 +262,141 @@ impl ConfigApp {
 
         ui.add_space(4.0);
 
+        // Visual effects (collapsed by default) — v0.3.3
+        egui::CollapsingHeader::new("Visual effects")
+            .default_open(false)
+            .show(ui, |ui| self.render_visual_effects(ui));
+
+        ui.add_space(4.0);
+
         // Advanced (collapsed by default)
         egui::CollapsingHeader::new("Advanced")
             .default_open(false)
             .show(ui, |ui| self.render_advanced(ui));
+    }
+
+    fn render_visual_effects(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Tuning knobs for the HDR + mip-chain bloom + phosphor \
+                 persistence pipeline introduced in v0.3.0. Defaults are \
+                 the values shipped in v0.3.2; the sliders let you push \
+                 the look harder or softer than that baseline.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(8.0);
+
+        // HDR head boost — the multiplier on head glyph emission. The
+        // glyph shader emits `(1.0 + head_mix * this)` × base color
+        // for heads, so a value of 0 means heads are LDR (same as
+        // trails); 1.5 is the v0.3.2 default (heads up to 2.5× bright);
+        // 3.0 is the v0.3.0 'wild halo' look (heads up to 4.0×, with
+        // ACES toe compression that crushes midtones).
+        ui.horizontal(|ui| {
+            ui.label("HDR head boost:");
+            ui.add(
+                egui::Slider::new(&mut self.working.vfx_head_hdr_scale, 0.0..=4.0)
+                    .step_by(0.05)
+                    .fixed_decimals(2),
+            );
+        });
+        ui.label(
+            egui::RichText::new(
+                "0 = no extra brightness on heads (LDR). 1.5 = v0.3.2 default. \
+                 3.0 = v0.3.0 'wild halo' — heads max at 4×, midtones get \
+                 crushed by the ACES tone-map.",
+            )
+            .weak()
+            .small(),
+        );
+
+        ui.add_space(8.0);
+
+        // Bloom threshold — HDR linear value at which bloom starts to
+        // contribute. Shader applies a soft knee at half-threshold.
+        ui.horizontal(|ui| {
+            ui.label("Bloom threshold:");
+            ui.add(
+                egui::Slider::new(&mut self.working.vfx_bloom_threshold, 0.0..=3.0)
+                    .step_by(0.05)
+                    .fixed_decimals(2),
+            );
+        });
+        ui.label(
+            egui::RichText::new(
+                "Below this HDR luminance, pixels don't bloom. Lower = more \
+                 glow across the whole image, fuzzier silhouette. Higher = \
+                 head-only halos, sharper. 0.7 = v0.3.2 default; 1.0 = v0.3.0.",
+            )
+            .weak()
+            .small(),
+        );
+
+        ui.add_space(8.0);
+
+        // Bloom intensity — per-upsample additive intensity.
+        ui.horizontal(|ui| {
+            ui.label("Bloom intensity:");
+            ui.add(
+                egui::Slider::new(&mut self.working.vfx_bloom_intensity, 0.0..=2.0)
+                    .step_by(0.05)
+                    .fixed_decimals(2),
+            );
+        });
+        ui.label(
+            egui::RichText::new(
+                "Strength of each of the 4 upsample levels (additive, so \
+                 effects compound). 0.85 is the shipped default — gentle \
+                 falloff that reads as phosphor wash. Push toward 2.0 for \
+                 a brighter, more saturated halo.",
+            )
+            .weak()
+            .small(),
+        );
+
+        ui.add_space(8.0);
+
+        // Overlay persist seconds — Phase D post-reveal dwell.
+        ui.horizontal(|ui| {
+            ui.label("Overlay dwell time:");
+            ui.add(
+                egui::Slider::new(&mut self.working.overlay_persist_seconds, 0.0..=120.0)
+                    .step_by(0.5)
+                    .fixed_decimals(1)
+                    .suffix(" s"),
+            );
+        });
+        ui.label(
+            egui::RichText::new(
+                "How long the painted silhouette stays on screen after the \
+                 last painting head finishes, before normal rain washes back \
+                 over it. 0 reproduces the pre-v0.3.2 'one-frame flash' bug. \
+                 15s is the v0.3.2 default.",
+            )
+            .weak()
+            .small(),
+        );
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        if ui.button("Reset visual effects to defaults").clicked() {
+            // Reset just the VFX block; leave overlays, variant, etc.
+            // alone. Defaults match Settings::default() field-for-field.
+            self.working.vfx_head_hdr_scale = 1.5;
+            self.working.vfx_bloom_threshold = 0.7;
+            self.working.vfx_bloom_intensity = 0.85;
+            self.working.overlay_persist_seconds = 15.0;
+            self.set_status(
+                "Visual effects reset — click Apply to save",
+                egui::Color32::LIGHT_BLUE,
+                4,
+            );
+        }
     }
 
     fn render_overlays(&mut self, ui: &mut egui::Ui) {

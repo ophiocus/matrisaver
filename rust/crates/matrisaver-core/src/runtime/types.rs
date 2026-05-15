@@ -9,12 +9,15 @@ const OVERLAY_TRIGGER_RANGE_SECONDS: f32 = 15.0;
 
 // Post-reveal hold: how long the painted silhouette dwells after the
 // last painting head finishes its targets, before clear_overlay_locks
-// fires and normal rain resumes. v0.3.x without this was clearing
-// locks the same frame the last head completed, so the fully-revealed
-// silhouette was visible for ~one frame only — the user perceived
-// "rain incoming shows the image then it gets overridden immediately
-// by normal rain." 15s gives the silhouette time to breathe.
-const OVERLAY_PERSIST_SECONDS: f32 = 15.0;
+// fires and normal rain resumes. Without it, v0.3.x cleared locks the
+// same frame the last head completed and the fully-revealed silhouette
+// was visible for ~one frame only.
+//
+// v0.3.3 made this an admin-panel slider — the runtime reads from
+// `Settings.overlay_persist_seconds` (default 15.0, range 0..120).
+// No const here anymore; the named-default fn in `lib.rs::config`
+// (`default_overlay_persist_seconds`) is the single source of truth
+// for the default value.
 const COLUMN_PITCH_SCALE: f32 = 0.5;
 const OVERLAY_DENSITY_GLYPHS: &str = ".:-=+*<>¦｜/\\";
 
