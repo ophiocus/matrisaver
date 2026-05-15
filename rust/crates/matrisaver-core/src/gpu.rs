@@ -274,7 +274,19 @@ const GLYPH_SHADER_WGSL: &str = "
         // a wide soft halo. head_mix gates this so only
         // leading heads crank up; trails stay near 1.0
         // and don't blow out the bloom.
-        let head_hdr_scale = 1.0 + head_mix * 3.0;
+        //
+        // v0.3.2: head_mix multiplier dialed from 3.0 back to
+        // 1.5 (heads emit max 2.5 instead of 4.0). At 4.0 the
+        // ACES tone-map curve compressed mid-luminance trail
+        // values too aggressively against the bright-head pop,
+        // producing a 'no midtones, looks thresholded' artefact
+        // in overlay-painted silhouettes — heads near max
+        // display brightness, trails crushed into the toe.
+        // 2.5 keeps the bloom contribution comfortable (still
+        // above the threshold knee) without eating the
+        // perceived midrange. Paired with a lower bloom
+        // threshold so trails contribute to the glow too.
+        let head_hdr_scale = 1.0 + head_mix * 1.5;
         let head_emissive = head_sheened * head_hdr_scale;
 
         let color = mix(head_emissive, ghost_color, is_ghost);
@@ -1729,11 +1741,15 @@ impl GpuRendererScaffold {
             0,
             bytemuck::bytes_of(&PostUniform {
                 texel_size: source_texel,
-                // HDR threshold: heads emit ~4.0 luminance, trails near
-                // 1.0. Threshold 1.0 captures the genuine over-bright
-                // tips and ignores the trails so bloom is anchored on
-                // heads rather than smeared over everything.
-                threshold: 1.0,
+                // HDR threshold: with v0.3.2's head_hdr_scale capped
+                // at 2.5, heads emit ~2.5 luminance; trails sit near
+                // 1.0. Threshold 0.7 (with soft-knee at 0.35 in the
+                // shader's `knee = threshold * 0.5`) lets bright
+                // trails contribute partially to the bloom and full
+                // heads contribute strongly. Bloom now fills in the
+                // perceived midrange the v0.3.0 threshold=1.0 was
+                // killing.
+                threshold: 0.7,
                 intensity: 1.0,
                 mode: 1.0,
                 _pad0: 0.0,

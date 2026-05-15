@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "matrisaver-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "ab_glyph",
  "bytemuck",
@@ -1945,21 +1945,21 @@ dependencies = [
 
 [[package]]
 name = "matrisaver-host-linux"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "matrisaver-core",
 ]
 
 [[package]]
 name = "matrisaver-host-macos"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "matrisaver-core",
 ]
 
 [[package]]
 name = "matrisaver-host-windows"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "eframe",
  "egui",

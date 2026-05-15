@@ -6,6 +6,15 @@ const OVERLAY_HOLD_SECONDS: f32 = 8.0;
 const OVERLAY_INITIAL_TRIGGER_SECONDS: f32 = 8.0;
 const OVERLAY_TRIGGER_MIN_SECONDS: f32 = 15.0;
 const OVERLAY_TRIGGER_RANGE_SECONDS: f32 = 15.0;
+
+// Post-reveal hold: how long the painted silhouette dwells after the
+// last painting head finishes its targets, before clear_overlay_locks
+// fires and normal rain resumes. v0.3.x without this was clearing
+// locks the same frame the last head completed, so the fully-revealed
+// silhouette was visible for ~one frame only — the user perceived
+// "rain incoming shows the image then it gets overridden immediately
+// by normal rain." 15s gives the silhouette time to breathe.
+const OVERLAY_PERSIST_SECONDS: f32 = 15.0;
 const COLUMN_PITCH_SCALE: f32 = 0.5;
 const OVERLAY_DENSITY_GLYPHS: &str = ".:-=+*<>¦｜/\\";
 

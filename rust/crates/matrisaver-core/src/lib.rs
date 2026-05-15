@@ -671,6 +671,14 @@ pub struct CoreRuntime {
     super_volatile_pulse_time: Option<f32>,
     overlay_active_until: Option<f32>,
     overlay_next_trigger: f32,
+    /// Post-reveal hold timestamp. Set when the last overlay painting
+    /// head completes its targets; the silhouette stays locked (frozen
+    /// cells preserved) until `now >= overlay_dissolve_at`, at which
+    /// point `clear_overlay_locks()` fires and normal rain resumes.
+    /// Without this, the painting heads completing immediately tore
+    /// down the silhouette — the user never got to dwell on the
+    /// fully-revealed image. See OVERLAY_PERSIST_SECONDS.
+    overlay_dissolve_at: Option<f32>,
     overlay_locked_cells: Vec<(usize, usize)>,
     overlay_image_cursor: usize,
     overlay_injected_count: u32,
@@ -714,6 +722,7 @@ impl CoreRuntime {
             super_volatile_pulse_time: None,
             overlay_active_until: None,
             overlay_next_trigger: OVERLAY_INITIAL_TRIGGER_SECONDS,
+            overlay_dissolve_at: None,
             overlay_locked_cells: Vec::new(),
             overlay_image_cursor: 0,
             overlay_injected_count: 0,

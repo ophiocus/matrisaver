@@ -1,14 +1,52 @@
 // Overlay state machine: trigger, lock management, and header advancement.
+//
+// Five phases, in order each frame:
+//
+//   1. Disabled: settings toggle off → tear down all overlay state,
+//      reset next-trigger clock.
+//   2. Active-hold (overlay_active_until set): post-injection window
+//      where intro ghost glyphs are visible but painting heads have
+//      not yet started moving. Just returns each frame.
+//   3. Painting (overlay_headers non-empty): painting heads sweep
+//      down their columns; advance_overlay_headers paints frozen
+//      silhouette cells as they reach each target row.
+//   4. Post-reveal hold (overlay_dissolve_at set): NEW in v0.3.2.
+//      After all painting heads complete, the silhouette dwells
+//      with cells still frozen for OVERLAY_PERSIST_SECONDS so the
+//      user can actually see the finished image. Previously cleared
+//      locks the same frame the last head completed, so the
+//      fully-revealed silhouette was visible for ~one frame.
+//   5. Idle: waiting for overlay_next_trigger to fire, then inject.
 impl CoreRuntime {
     fn update_overlay_state(&mut self, now: f32, rows: u32, frame_dt: f32) {
         if !self.settings.overlay_enabled {
             self.clear_overlay_locks();
             self.overlay_active_until = None;
+            self.overlay_dissolve_at = None;
             self.overlay_next_trigger = now + OVERLAY_INITIAL_TRIGGER_SECONDS;
             self.overlay_injected_count = 0;
             self.overlay_image_name = "none".to_owned();
             self.overlay_headers.clear();
             self.overlay_intro_glyphs.clear();
+            return;
+        }
+
+        // Phase 4: post-reveal hold. Silhouette is fully painted and
+        // dwelling. When the dwell window expires, clear locks (which
+        // unfreezes the painted cells, returning them to normal rain)
+        // and schedule the next overlay.
+        if let Some(dissolve_at) = self.overlay_dissolve_at {
+            if now < dissolve_at {
+                return;
+            }
+            self.overlay_dissolve_at = None;
+            self.clear_overlay_locks();
+            self.overlay_injected_count = 0;
+            self.overlay_image_name = "none".to_owned();
+            self.overlay_next_trigger =
+                now + OVERLAY_TRIGGER_MIN_SECONDS
+                    + hash01(self.frame_index as u32, 0x0F0F_4422)
+                        * OVERLAY_TRIGGER_RANGE_SECONDS;
             return;
         }
 
@@ -21,13 +59,11 @@ impl CoreRuntime {
 
         if !self.overlay_headers.is_empty() {
             if self.advance_overlay_headers(frame_dt) {
-                self.clear_overlay_locks();
-                self.overlay_injected_count = 0;
-                self.overlay_image_name = "none".to_owned();
-                self.overlay_next_trigger =
-                    now + OVERLAY_TRIGGER_MIN_SECONDS
-                        + hash01(self.frame_index as u32, 0x0F0F_4422)
-                            * OVERLAY_TRIGGER_RANGE_SECONDS;
+                // Don't clear_overlay_locks() here — the silhouette is
+                // *just now* fully visible. Enter post-reveal hold
+                // instead. clear_overlay_locks() will fire when
+                // overlay_dissolve_at elapses.
+                self.overlay_dissolve_at = Some(now + OVERLAY_PERSIST_SECONDS);
             }
             return;
         }
