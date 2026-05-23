@@ -71,7 +71,7 @@ Settings are saved via `matrisaver-core::storage` to:
 
 ## Windows Runtime Validation (PowerShell)
 
-From `H:\matrisaver\rust` on the Win11 host:
+From `I:\matrisaver\rust` on the Win11 host:
 
 ```powershell
 cargo test -p matrisaver-host-windows
@@ -91,7 +91,7 @@ cargo run -q -p matrisaver-host-windows -- /s --gpu-scaffold --wgpu-backend gl -
 .\target\release\matrisaver-host-windows.exe /s --lifecycle-frames 120
 
 # Lifecycle trace capture.
-.\target\release\matrisaver-host-windows.exe /s --lifecycle-trace-file H:\matrisaver\artifacts\lifecycle_trace.log
+.\target\release\matrisaver-host-windows.exe /s --lifecycle-trace-file I:\matrisaver\artifacts\lifecycle_trace.log
 ```
 
 Note: `/p` requires a real parent preview window handle from the shell host; the numeric sample

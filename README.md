@@ -45,7 +45,7 @@ screensaver install.
 A convenience launcher is provided at the repo root:
 
 ```
-H:\matrisaver\run-screensaver.cmd
+I:\matrisaver\run-screensaver.cmd
 ```
 
 Double-click runs the local release build in screensaver mode.
