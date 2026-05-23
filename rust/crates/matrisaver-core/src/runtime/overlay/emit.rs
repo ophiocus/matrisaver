@@ -7,6 +7,12 @@ impl CoreRuntime {
         surface_height: f32,
         char_size: u32,
     ) {
+        // `overlay_skip_preview` variants (e.g. bane) suppress the dim
+        // intro ghost layer entirely — the silhouette is revealed only by
+        // the painting heads, never previewed.
+        if self.runtime_config.overlay_skip_preview {
+            return;
+        }
         if self.overlay_intro_glyphs.is_empty() || self.overlay_headers.is_empty() {
             return;
         }

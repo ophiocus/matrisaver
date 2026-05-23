@@ -43,7 +43,15 @@ impl CoreRuntime {
         let col_end = ((ref_x + ref_w) as f32 / pitch).ceil() as i32;
         let cols = (col_end - col_start).max(1) as u32;
         let ascii_cols = ((cols as f32) * COLUMN_PITCH_SCALE).floor().max(1.0) as u32;
-        let column_span = (1.0 / COLUMN_PITCH_SCALE).round().max(1.0) as u32;
+        // Default packing fills every rain column-slot per image column
+        // (span = 1/pitch), giving a dense half-char-pitch overlay. When
+        // a variant requests full pitch (e.g. bane), paint one slot per
+        // image column so glyphs stand at char_size pitch like the rain.
+        let column_span = if self.runtime_config.overlay_full_pitch {
+            1
+        } else {
+            (1.0 / COLUMN_PITCH_SCALE).round().max(1.0) as u32
+        };
         let row_start = (ref_y / char_size) as i32;
         let row_end = ((ref_y + ref_h) as f32 / char_size as f32).ceil() as i32;
         let rows = (row_end - row_start).max(1) as u32;

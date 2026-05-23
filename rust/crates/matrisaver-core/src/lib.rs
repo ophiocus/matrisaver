@@ -84,6 +84,24 @@ pub mod config {
         /// directories — so the film-specific silhouette is the only
         /// thing painted. `None` uses the normal overlay resolution chain.
         pub overlay_subdir: Option<&'static str>,
+        /// Paint the overlay silhouette at full `char_size` column pitch
+        /// instead of the default packed pitch. The overlay normally
+        /// fills every rain column-slot (`column_span = 1/COLUMN_PITCH_SCALE`),
+        /// so silhouette glyphs sit at half-char pitch and overlap into a
+        /// dense fine mat — fine for the soft default image pack, but it
+        /// makes a bold silhouette like `bane` read as tiny next to the
+        /// sparse full-size rain. `true` drops the span to 1 so each
+        /// painted glyph stands alone at the same visual weight as the
+        /// rain. `false` keeps the dense default.
+        pub overlay_full_pitch: bool,
+        /// Skip the "dim pre-show": the post-injection active-hold window
+        /// that displays a dim full-silhouette preview (the intro ghost
+        /// layer) before the painting heads sweep in. `true` jumps
+        /// straight to painting, so the silhouette is revealed only as
+        /// the heads paint and freeze it — the lifecycle becomes
+        /// rain → paint-in → freeze/hold → release → rain washes back.
+        /// `false` keeps the preview the default image pack was tuned for.
+        pub overlay_skip_preview: bool,
         pub speed_range: (u8, u8),
         pub density: f32,
         pub symbol_set: SymbolSet,
@@ -116,6 +134,12 @@ pub mod config {
         /// Variant-pinned overlay subdirectory, propagated from
         /// `VariantConfig`. `Some("bane")` = use only that overlay dir.
         pub overlay_subdir: Option<&'static str>,
+        /// Paint the silhouette at full char-size pitch (no column-slot
+        /// packing), propagated from `VariantConfig`. `true` for `bane`.
+        pub overlay_full_pitch: bool,
+        /// Skip the dim pre-show active-hold window, propagated from
+        /// `VariantConfig`. `true` for `bane`.
+        pub overlay_skip_preview: bool,
         pub speed_range: (u8, u8),
         pub density: f32,
         pub symbols: String,
@@ -144,6 +168,8 @@ pub mod config {
                 color: self.color,
                 overlay_tint: self.overlay_tint.unwrap_or(self.color),
                 overlay_subdir: self.overlay_subdir,
+                overlay_full_pitch: self.overlay_full_pitch,
+                overlay_skip_preview: self.overlay_skip_preview,
                 speed_range: self.speed_range,
                 density: self.density,
                 symbols: self.symbol_set.materialize(),
@@ -198,6 +224,8 @@ pub mod config {
             color: (35, 235, 65),
             overlay_tint: None,
             overlay_subdir: None,
+            overlay_full_pitch: false,
+            overlay_skip_preview: false,
             speed_range: (4, 10),
             density: 1.0,
             symbol_set: SymbolSet::KatakanaSymbols,
@@ -227,6 +255,8 @@ pub mod config {
             color: (0, 255, 90),
             overlay_tint: None,
             overlay_subdir: None,
+            overlay_full_pitch: false,
+            overlay_skip_preview: false,
             speed_range: (6, 14),
             density: 0.9,
             symbol_set: SymbolSet::KatakanaSymbolsLatin,
@@ -253,6 +283,8 @@ pub mod config {
             color: (0, 230, 70),
             overlay_tint: None,
             overlay_subdir: None,
+            overlay_full_pitch: false,
+            overlay_skip_preview: false,
             speed_range: (3, 16),
             density: 0.75,
             symbol_set: SymbolSet::KatakanaSymbols,
@@ -279,6 +311,8 @@ pub mod config {
             color: (0, 220, 150),
             overlay_tint: None,
             overlay_subdir: None,
+            overlay_full_pitch: false,
+            overlay_skip_preview: false,
             speed_range: (5, 12),
             density: 0.85,
             symbol_set: SymbolSet::KatakanaSymbolsLatin,
@@ -322,6 +356,13 @@ pub mod config {
             overlay_tint: Some((255, 18, 14)),
             // Draw only the Bane silhouette mask, not the default pack.
             overlay_subdir: Some("bane"),
+            // Paint the silhouette at full char-size pitch so the code
+            // forming Bane reads at the same scale as the rain, instead
+            // of a dense half-pitch mat.
+            overlay_full_pitch: true,
+            // No dim preview — the silhouette appears only as the heads
+            // paint it in over the rain.
+            overlay_skip_preview: true,
             speed_range: (3, 11),
             // Sparse field. 0.5 sits clearly below every other variant
             // and above the 0.3 sanitize floor.
@@ -1237,12 +1278,18 @@ mod tests {
         assert_eq!(runtime.color, (12, 130, 45));
         assert_eq!(runtime.overlay_tint, (255, 18, 14));
         assert_ne!(runtime.color, runtime.overlay_tint);
-        // Variant pins its own overlay directory.
+        // Variant pins its own overlay directory, paints at full pitch,
+        // and skips the dim pre-show preview.
         assert_eq!(runtime.overlay_subdir, Some("bane"));
-        // Films keep the field colour for overlays (no recolour).
+        assert!(runtime.overlay_full_pitch);
+        assert!(runtime.overlay_skip_preview);
+        // Films keep the field colour, default overlay chain, dense
+        // half-pitch packing, and the dim preview (no overrides).
         let original = config::variant_by_key("original").unwrap().to_runtime(22);
         assert_eq!(original.overlay_tint, original.color);
         assert_eq!(original.overlay_subdir, None);
+        assert!(!original.overlay_full_pitch);
+        assert!(!original.overlay_skip_preview);
     }
 
     #[test]

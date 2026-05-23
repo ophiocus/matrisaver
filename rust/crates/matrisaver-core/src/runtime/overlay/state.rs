@@ -87,7 +87,17 @@ impl CoreRuntime {
             return;
         }
 
-        self.overlay_active_until = Some(now + OVERLAY_HOLD_SECONDS);
+        // The active-hold window is the "dim pre-show": it displays the
+        // intro ghost layer as a dim full-silhouette preview before the
+        // painting heads move. Variants with `overlay_skip_preview` skip
+        // it entirely (active_until = None), so the very next frame enters
+        // the painting phase and the silhouette is revealed only as the
+        // heads paint it in.
+        self.overlay_active_until = if self.runtime_config.overlay_skip_preview {
+            None
+        } else {
+            Some(now + OVERLAY_HOLD_SECONDS)
+        };
     }
 
     fn clear_overlay_locks(&mut self) {
