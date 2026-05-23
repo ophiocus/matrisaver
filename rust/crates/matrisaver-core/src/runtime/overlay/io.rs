@@ -84,64 +84,97 @@ impl CoreRuntime {
         dir.is_dir().then_some(dir)
     }
 
-    /// Resolved overlay image set, each entry `(image_path,
-    /// write_ascii_alongside)`. V2.1 layering, highest priority first:
+    /// Resolved overlay image queue, each entry `(image_path,
+    /// write_ascii_alongside)`, cycled by `overlay_image_cursor`.
     ///
-    ///   1. `Settings.overlay_directories` — the user's explicit list,
-    ///      walked in declaration order. `write_ascii_alongside` rides
-    ///      from each `OverlaySource`.
-    ///   2. `%ProgramData%\matrisaver\overlays\` — the MSI-installed
-    ///      pack. Always searched as a baseline so a fresh install
-    ///      shows overlays without the user adding anything.
-    ///   3. Legacy `resolve_overlay_directory()` — only consulted when
-    ///      1 and 2 produced nothing (i.e. a dev build with no MSI
-    ///      pack and an empty settings list; the ancestor-walk finds
-    ///      the repo's `assets/overlays/`).
+    /// V2.2 per-variant queue model:
     ///
-    /// Dedup is by filename, first-source-wins, so a user directory
-    /// shadows a same-named file in the shipped pack.
+    ///   * Every variant leads with its own iconic-scene set under
+    ///     `assets/overlays/<overlay_subdir>/` (or the ProgramData
+    ///     equivalent). That's the queue when no folder is configured.
+    ///   * `Settings.overlay_directories` (user folders) are collected
+    ///     separately, then **interleaved** with the variant queue —
+    ///     variant iconic first, then folder, then variant, then folder…
+    ///     so the film's signature scene always opens the cycle and the
+    ///     user's images are woven in.
+    ///   * If both produced nothing (a variant with no populated subdir
+    ///     and no user folders), fall back to the shared shipped pack
+    ///     (`%ProgramData%\matrisaver\overlays\`) and then the legacy
+    ///     `assets/overlays/` root, so a bare install still shows overlays.
+    ///
+    /// Dedup is by filename, first-occurrence-wins (so the variant copy
+    /// of a same-named file shadows a folder copy).
     fn overlay_image_paths(&self) -> Vec<(std::path::PathBuf, bool)> {
-        let mut seen = std::collections::HashSet::<std::ffi::OsString>::new();
-        let mut paths = Vec::new();
-
-        // Variant-pinned overlay (e.g. `bane`): when a variant names an
-        // overlay subdirectory, use ONLY that directory so the film-
-        // specific silhouette isn't mixed with the default overlay pack
-        // or user-configured directories. Walk every overlays-root
-        // candidate (ProgramData pack root + the legacy-resolved root)
-        // and collect the subdir under each.
+        // 1. The variant's built-in iconic-scene queue (leads).
+        let mut variant_queue = Vec::new();
+        let mut variant_seen = std::collections::HashSet::<std::ffi::OsString>::new();
         if let Some(subdir) = self.runtime_config.overlay_subdir {
             for root in self.overlay_root_candidates() {
                 let dir = root.join(subdir);
                 if dir.is_dir() {
-                    Self::collect_overlay_dir(&dir, false, &mut seen, &mut paths);
+                    Self::collect_overlay_dir(&dir, false, &mut variant_seen, &mut variant_queue);
                 }
             }
-            return paths;
         }
 
+        // 2. User-configured folders.
+        let mut folder_queue = Vec::new();
+        let mut folder_seen = std::collections::HashSet::<std::ffi::OsString>::new();
         for source in &self.settings.overlay_directories {
             if source.enabled {
                 Self::collect_overlay_dir(
                     &source.path,
                     source.write_ascii_alongside,
-                    &mut seen,
-                    &mut paths,
+                    &mut folder_seen,
+                    &mut folder_queue,
                 );
             }
         }
 
+        // 3. Interleave (variant iconic first); dedup by filename.
+        let combined = Self::interleave_overlay_queues(variant_queue, folder_queue);
+        if !combined.is_empty() {
+            return combined;
+        }
+
+        // 4. Fallback: shared shipped pack, then legacy root.
+        let mut seen = std::collections::HashSet::<std::ffi::OsString>::new();
+        let mut paths = Vec::new();
         if let Some(pack) = Self::programdata_overlays_dir() {
             Self::collect_overlay_dir(&pack, false, &mut seen, &mut paths);
         }
-
         if paths.is_empty() {
             if let Some(legacy) = self.resolve_overlay_directory() {
                 Self::collect_overlay_dir(&legacy, false, &mut seen, &mut paths);
             }
         }
-
         paths
+    }
+
+    /// Interleave the variant iconic-scene queue with the user-folder
+    /// queue, variant entry first at each index, deduping by filename
+    /// (first occurrence wins). `[v0, v1]` + `[f0, f1, f2]` becomes
+    /// `[v0, f0, v1, f1, f2]`.
+    fn interleave_overlay_queues(
+        variant: Vec<(std::path::PathBuf, bool)>,
+        folder: Vec<(std::path::PathBuf, bool)>,
+    ) -> Vec<(std::path::PathBuf, bool)> {
+        let mut combined = Vec::with_capacity(variant.len() + folder.len());
+        let mut seen = std::collections::HashSet::<std::ffi::OsString>::new();
+        let max = variant.len().max(folder.len());
+        for index in 0..max {
+            for (path, write_ascii) in [variant.get(index), folder.get(index)].into_iter().flatten()
+            {
+                let key = path
+                    .file_name()
+                    .map(|name| name.to_os_string())
+                    .unwrap_or_default();
+                if seen.insert(key) {
+                    combined.push((path.clone(), *write_ascii));
+                }
+            }
+        }
+        combined
     }
 
     /// Overlays-root candidates a variant-pinned subdirectory can live

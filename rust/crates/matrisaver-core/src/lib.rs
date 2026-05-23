@@ -223,7 +223,11 @@ pub mod config {
             name: "The Matrix (1999)",
             color: (35, 235, 65),
             overlay_tint: None,
-            overlay_subdir: None,
+            // Each variant leads its overlay queue with its own film's
+            // iconic-scene set under assets/overlays/<key>/. Empty/absent
+            // dirs fall back to the shared pack, so this is a no-op until
+            // the per-film art is dropped in.
+            overlay_subdir: Some("original"),
             overlay_full_pitch: false,
             overlay_skip_preview: false,
             speed_range: (4, 10),
@@ -254,7 +258,7 @@ pub mod config {
             name: "The Matrix Reloaded (2003)",
             color: (0, 255, 90),
             overlay_tint: None,
-            overlay_subdir: None,
+            overlay_subdir: Some("reloaded"),
             overlay_full_pitch: false,
             overlay_skip_preview: false,
             speed_range: (6, 14),
@@ -282,7 +286,7 @@ pub mod config {
             name: "The Matrix Revolutions (2003)",
             color: (0, 230, 70),
             overlay_tint: None,
-            overlay_subdir: None,
+            overlay_subdir: Some("revolutions"),
             overlay_full_pitch: false,
             overlay_skip_preview: false,
             speed_range: (3, 16),
@@ -310,7 +314,7 @@ pub mod config {
             name: "The Matrix Resurrections (2021)",
             color: (0, 220, 150),
             overlay_tint: None,
-            overlay_subdir: None,
+            overlay_subdir: Some("resurrections"),
             overlay_full_pitch: false,
             overlay_skip_preview: false,
             speed_range: (5, 12),
@@ -1283,13 +1287,59 @@ mod tests {
         assert_eq!(runtime.overlay_subdir, Some("bane"));
         assert!(runtime.overlay_full_pitch);
         assert!(runtime.overlay_skip_preview);
-        // Films keep the field colour, default overlay chain, dense
-        // half-pitch packing, and the dim preview (no overrides).
+        // Films keep the field colour, dense half-pitch packing, and the
+        // dim preview (no rendering overrides), but each now leads its
+        // overlay queue with its own per-film subdir.
         let original = config::variant_by_key("original").unwrap().to_runtime(22);
         assert_eq!(original.overlay_tint, original.color);
-        assert_eq!(original.overlay_subdir, None);
+        assert_eq!(original.overlay_subdir, Some("original"));
         assert!(!original.overlay_full_pitch);
         assert!(!original.overlay_skip_preview);
+    }
+
+    #[test]
+    fn overlay_queue_interleaves_variant_iconic_first() {
+        let variant = vec![
+            (PathBuf::from("/v/scene1.png"), false),
+            (PathBuf::from("/v/scene2.png"), false),
+        ];
+        let folder = vec![
+            (PathBuf::from("/f/a.png"), true),
+            (PathBuf::from("/f/b.png"), true),
+            (PathBuf::from("/f/c.png"), true),
+        ];
+        let out = CoreRuntime::interleave_overlay_queues(variant, folder);
+        let names: Vec<String> = out
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // Variant iconic leads, then folder, alternating; the longer
+        // queue's tail follows once the shorter is exhausted.
+        assert_eq!(
+            names,
+            vec!["scene1.png", "a.png", "scene2.png", "b.png", "c.png"]
+        );
+        // write_ascii flag rides through (folder entries true).
+        assert!(out[1].1);
+    }
+
+    #[test]
+    fn overlay_queue_dedupes_by_filename_variant_wins() {
+        let variant = vec![(PathBuf::from("/v/dup.png"), false)];
+        let folder = vec![(PathBuf::from("/f/dup.png"), true)];
+        let out = CoreRuntime::interleave_overlay_queues(variant, folder);
+        assert_eq!(out.len(), 1);
+        // The variant copy appears first, so it wins the dedup.
+        assert_eq!(out[0].0, PathBuf::from("/v/dup.png"));
+        assert!(!out[0].1);
+    }
+
+    #[test]
+    fn overlay_queue_empty_variant_yields_folder_only() {
+        let folder = vec![(PathBuf::from("/f/a.png"), false)];
+        let out = CoreRuntime::interleave_overlay_queues(Vec::new(), folder);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, PathBuf::from("/f/a.png"));
     }
 
     #[test]
