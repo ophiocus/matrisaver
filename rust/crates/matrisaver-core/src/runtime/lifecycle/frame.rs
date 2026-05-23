@@ -46,6 +46,7 @@ impl CoreRuntime {
                             volatile_last: 0.0,
                             super_volatile: false,
                             frozen: false,
+                            overlay_color: [0.0; 3],
                         },
                     );
                 }
@@ -154,6 +155,7 @@ impl CoreRuntime {
                     position_size: [x, *y_value + char_size as f32 * 0.5, char_size as f32, char_size as f32],
                     uv_rect: [glyph.u0, glyph.v0, glyph.u1, glyph.v1],
                     params: [brightness, head_boost, grain, 0.0],
+                    color: [0.0; 4],
                 });
             }
 
@@ -175,6 +177,7 @@ impl CoreRuntime {
                     position_size: [x, y + char_size as f32 * 0.5, char_size as f32, char_size as f32],
                     uv_rect: [glyph.u0, glyph.v0, glyph.u1, glyph.v1],
                     params: [0.18, 0.05, 0.2, 2.0],
+                    color: [0.0; 4],
                 });
             }
         }

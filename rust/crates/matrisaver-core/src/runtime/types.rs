@@ -30,6 +30,10 @@ struct RowCell {
     volatile_last: f32,
     super_volatile: bool,
     frozen: bool,
+    /// Sampled overlay colour (rgb), set when a painting head freezes
+    /// this cell into a silhouette. Only consulted by the renderer for
+    /// frozen cells under a sample-colour variant; otherwise unused.
+    overlay_color: [f32; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +41,9 @@ struct OverlayTargetCell {
     row_index: usize,
     glyph_index: u32,
     brightness: f32,
+    /// Colour sampled from the source image at this cell, carried so the
+    /// frozen silhouette can render in the scene's own hues.
+    color: [f32; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +64,8 @@ struct OverlayIntroGlyph {
     x_offset: f32,
     glyph_index: u32,
     brightness: f32,
+    /// Colour sampled from the source image at this cell.
+    color: [f32; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

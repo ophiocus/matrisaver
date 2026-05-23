@@ -143,6 +143,7 @@ impl CoreRuntime {
                     volatile_last: 0.0,
                     super_volatile: false,
                     frozen: false,
+                    overlay_color: [0.0; 3],
                 };
                 rows as usize
             ];
@@ -232,6 +233,7 @@ impl CoreRuntime {
                     volatile_last: 0.0,
                     super_volatile: false,
                     frozen: false,
+                    overlay_color: [0.0; 3],
                 };
                 rows as usize
             ];

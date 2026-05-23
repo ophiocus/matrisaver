@@ -1,5 +1,8 @@
 // Overlay injection from image files into the rain column grid.
-type ColumnRowTargets = std::collections::BTreeMap<usize, (u32, f32)>;
+// row_index -> (glyph_index, brightness, sampled_rgb)
+type ColumnRowTargets = std::collections::BTreeMap<usize, (u32, f32, [f32; 3])>;
+// (column_slot, row_index, intro_index) -> (glyph_index, brightness, sampled_rgb)
+type IntroTargets = std::collections::HashMap<(u32, usize, u32), (u32, f32, [f32; 3])>;
 
 impl CoreRuntime {
     fn inject_overlay_from_image(&mut self, _rows: u32) -> bool {
@@ -72,9 +75,10 @@ impl CoreRuntime {
         let sample_len = (fit_cols * fit_rows) as usize;
         let mut sampled_alpha = vec![0.0f32; sample_len];
         let mut sampled_luma = vec![0.0f32; sample_len];
+        let mut sampled_color = vec![[0.0f32; 3]; sample_len];
         for cell_row in 0..fit_rows {
             for cell_col in 0..fit_cols {
-                let (alpha, luminance) = Self::sample_overlay_cell(
+                let (alpha, luminance, color) = Self::sample_overlay_cell(
                     &image,
                     CellGrid { cols: fit_cols, rows: fit_rows },
                     cell_col,
@@ -84,6 +88,7 @@ impl CoreRuntime {
                 let index = (cell_row * fit_cols + cell_col) as usize;
                 sampled_alpha[index] = alpha;
                 sampled_luma[index] = luminance;
+                sampled_color[index] = color;
             }
         }
 
@@ -114,9 +119,10 @@ impl CoreRuntime {
         let dense_sample_len = (dense_fit_cols * fit_rows) as usize;
         let mut dense_alpha = vec![0.0f32; dense_sample_len];
         let mut dense_luma = vec![0.0f32; dense_sample_len];
+        let mut dense_color = vec![[0.0f32; 3]; dense_sample_len];
         for cell_row in 0..fit_rows {
             for dense_col in 0..dense_fit_cols {
-                let (alpha, luminance) = Self::sample_overlay_cell(
+                let (alpha, luminance, color) = Self::sample_overlay_cell(
                     &image,
                     CellGrid { cols: dense_fit_cols, rows: fit_rows },
                     dense_col,
@@ -126,6 +132,7 @@ impl CoreRuntime {
                 let index = (cell_row * dense_fit_cols + dense_col) as usize;
                 dense_alpha[index] = alpha;
                 dense_luma[index] = luminance;
+                dense_color[index] = color;
             }
         }
         let (dense_levels_low, dense_levels_high) = if tuning.auto_levels_enabled {
@@ -152,8 +159,7 @@ impl CoreRuntime {
         let coverage_ramp = self.atlas.coverage_ramp();
         let mut per_column_targets: std::collections::HashMap<usize, ColumnRowTargets> =
             std::collections::HashMap::new();
-        let mut intro_targets: std::collections::HashMap<(u32, usize, u32), (u32, f32)> =
-            std::collections::HashMap::new();
+        let mut intro_targets: IntroTargets = IntroTargets::new();
         for cell_row in 0..fit_rows {
             for cell_col in 0..fit_cols {
                 let index = (cell_row * fit_cols + cell_col) as usize;
@@ -208,16 +214,17 @@ impl CoreRuntime {
                     };
                     let brightness = (tuning.brightness_floor + shaped * alpha * tuning.brightness_scale)
                         .clamp(tuning.brightness_floor, 1.0);
+                    let cell_color = sampled_color[index];
                     per_column_targets
                         .entry(column_index)
                         .or_default()
                         .entry(row_index)
                         .and_modify(|value| {
                             if brightness > value.1 {
-                                *value = (glyph_index, brightness);
+                                *value = (glyph_index, brightness, cell_color);
                             }
                         })
-                        .or_insert((glyph_index, brightness));
+                        .or_insert((glyph_index, brightness, cell_color));
 
                     for intro_index in 0..intro_density_columns {
                         let dense_col = cell_col * intro_density_columns + intro_index;
@@ -245,22 +252,24 @@ impl CoreRuntime {
                             * tuning.intro_layer_brightness_scale;
                         let dense_brightness =
                             dense_brightness.clamp(tuning.brightness_floor, 1.0);
+                        let dense_cell_color = dense_color[dense_index];
                         let key = (column_slot, row_index, intro_index);
                         intro_targets
                             .entry(key)
                             .and_modify(|value| {
                                 if dense_brightness > value.1 {
-                                    *value = (dense_glyph_index, dense_brightness);
+                                    *value = (dense_glyph_index, dense_brightness, dense_cell_color);
                                 }
                             })
-                            .or_insert((dense_glyph_index, dense_brightness));
+                            .or_insert((dense_glyph_index, dense_brightness, dense_cell_color));
                     }
                 }
             }
         }
 
         self.overlay_intro_glyphs.reserve(intro_targets.len());
-        for ((column_slot, row_index, intro_index), (glyph_index, brightness)) in intro_targets {
+        for ((column_slot, row_index, intro_index), (glyph_index, brightness, color)) in intro_targets
+        {
             let intro_center = (intro_index as f32 + 0.5) / intro_density_columns as f32 - 0.5;
             self.overlay_intro_glyphs.push(OverlayIntroGlyph {
                 column_slot,
@@ -268,6 +277,7 @@ impl CoreRuntime {
                 x_offset: intro_center * char_size as f32,
                 glyph_index,
                 brightness,
+                color,
             });
         }
 
@@ -283,10 +293,11 @@ impl CoreRuntime {
             };
             let target_list: Vec<OverlayTargetCell> = targets
                 .into_iter()
-                .map(|(row_index, (glyph_index, brightness))| OverlayTargetCell {
+                .map(|(row_index, (glyph_index, brightness, color))| OverlayTargetCell {
                     row_index,
                     glyph_index,
                     brightness,
+                    color,
                 })
                 .collect();
             if target_list.is_empty() {

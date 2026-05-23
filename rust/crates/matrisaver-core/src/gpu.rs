@@ -144,6 +144,10 @@ const _: () = assert!(
 pub struct GlyphTints {
     pub field: [f32; 3],
     pub overlay: [f32; 3],
+    /// When true, overlay glyphs use their per-instance sampled colour
+    /// (`GlyphInstance.color`) instead of the flat `overlay` tint. Rides
+    /// into the shader as `vfx_params.y`.
+    pub sample_overlay_color: bool,
 }
 
 /// Per-frame visual-effects parameters sourced from `Settings`. Bundled
@@ -262,6 +266,7 @@ const GLYPH_SHADER_WGSL: &str = "
         @location(1) instance_pos_size: vec4<f32>,
         @location(2) instance_uv: vec4<f32>,
         @location(3) instance_params: vec4<f32>,
+        @location(4) instance_color: vec4<f32>,
     };
 
     struct VertexOut {
@@ -271,6 +276,7 @@ const GLYPH_SHADER_WGSL: &str = "
         @location(2) head_boost: f32,
         @location(3) grain: f32,
         @location(4) style_tag: f32,
+        @location(5) instance_color: vec3<f32>,
     };
 
     @vertex
@@ -289,6 +295,7 @@ const GLYPH_SHADER_WGSL: &str = "
         output.head_boost = input.instance_params.y;
         output.grain = input.instance_params.z;
         output.style_tag = input.instance_params.w;
+        output.instance_color = input.instance_color.rgb;
         return output;
     }
 
@@ -320,10 +327,13 @@ const GLYPH_SHADER_WGSL: &str = "
         let value_pulsed = clamp(value_base * (1.0 + pulse), 0.0, 1.0);
         let value_final = value_pulsed;
         let head_mix = clamp(input.head_boost * (0.65 + globals.style_params.y * 0.35), 0.0, 1.0);
-        // Field glyphs use glyph_tint; overlay-flagged glyphs use
-        // overlay_tint. For non-bane variants the caller sets the two
-        // equal, so this mix is a no-op and the field colour is unchanged.
-        let base_color = mix(globals.glyph_tint.rgb, globals.overlay_tint.rgb, is_overlay);
+        // Overlay glyph colour is either the flat overlay_tint or the
+        // per-instance colour sampled from the source image, selected by
+        // vfx_params.y (0 = flat tint e.g. bane's crimson, 1 = sampled
+        // e.g. the film iconic-scene overlays). Field (non-overlay) glyphs
+        // always use glyph_tint.
+        let overlay_src = mix(globals.overlay_tint.rgb, input.instance_color, globals.vfx_params.y);
+        let base_color = mix(globals.glyph_tint.rgb, overlay_src, is_overlay);
         // The cool-white head wash and the green specular sheen are
         // falling-head effects — they must NOT apply to overlay glyphs,
         // or a bright silhouette (e.g. the lit Bane face, head_mix ~0.9)
@@ -1090,6 +1100,11 @@ impl GpuRendererScaffold {
                                 offset: 32,
                                 shader_location: 3,
                             },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 48,
+                                shader_location: 4,
+                            },
                         ],
                     },
                 ],
@@ -1707,7 +1722,12 @@ impl GpuRendererScaffold {
                 time_pad: [time, 0.0],
                 glyph_tint: [tints.field[0], tints.field[1], tints.field[2], 1.0],
                 style_params,
-                vfx_params: [vfx.head_hdr_scale, 0.0, 0.0, 0.0],
+                vfx_params: [
+                    vfx.head_hdr_scale,
+                    if tints.sample_overlay_color { 1.0 } else { 0.0 },
+                    0.0,
+                    0.0,
+                ],
                 overlay_tint: [tints.overlay[0], tints.overlay[1], tints.overlay[2], 1.0],
             }),
         );

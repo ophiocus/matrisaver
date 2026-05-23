@@ -102,6 +102,12 @@ pub mod config {
         /// rain → paint-in → freeze/hold → release → rain washes back.
         /// `false` keeps the preview the default image pack was tuned for.
         pub overlay_skip_preview: bool,
+        /// Colour overlay glyphs by sampling the source image's hue per
+        /// cell, instead of a single flat `overlay_tint`. `true` makes the
+        /// painted code carry the scene's own colours (the film variants
+        /// want this for their iconic-scene overlays). `false` uses the
+        /// flat `overlay_tint` — bane keeps its fixed crimson.
+        pub overlay_sample_color: bool,
         pub speed_range: (u8, u8),
         pub density: f32,
         pub symbol_set: SymbolSet,
@@ -140,6 +146,9 @@ pub mod config {
         /// Skip the dim pre-show active-hold window, propagated from
         /// `VariantConfig`. `true` for `bane`.
         pub overlay_skip_preview: bool,
+        /// Sample overlay glyph colour from the source image per cell,
+        /// propagated from `VariantConfig`. `true` for the film variants.
+        pub overlay_sample_color: bool,
         pub speed_range: (u8, u8),
         pub density: f32,
         pub symbols: String,
@@ -170,6 +179,7 @@ pub mod config {
                 overlay_subdir: self.overlay_subdir,
                 overlay_full_pitch: self.overlay_full_pitch,
                 overlay_skip_preview: self.overlay_skip_preview,
+                overlay_sample_color: self.overlay_sample_color,
                 speed_range: self.speed_range,
                 density: self.density,
                 symbols: self.symbol_set.materialize(),
@@ -230,6 +240,7 @@ pub mod config {
             overlay_subdir: Some("original"),
             overlay_full_pitch: false,
             overlay_skip_preview: false,
+            overlay_sample_color: true,
             speed_range: (4, 10),
             density: 1.0,
             symbol_set: SymbolSet::KatakanaSymbols,
@@ -261,6 +272,7 @@ pub mod config {
             overlay_subdir: Some("reloaded"),
             overlay_full_pitch: false,
             overlay_skip_preview: false,
+            overlay_sample_color: true,
             speed_range: (6, 14),
             density: 0.9,
             symbol_set: SymbolSet::KatakanaSymbolsLatin,
@@ -289,6 +301,7 @@ pub mod config {
             overlay_subdir: Some("revolutions"),
             overlay_full_pitch: false,
             overlay_skip_preview: false,
+            overlay_sample_color: true,
             speed_range: (3, 16),
             density: 0.75,
             symbol_set: SymbolSet::KatakanaSymbols,
@@ -317,6 +330,7 @@ pub mod config {
             overlay_subdir: Some("resurrections"),
             overlay_full_pitch: false,
             overlay_skip_preview: false,
+            overlay_sample_color: true,
             speed_range: (5, 12),
             density: 0.85,
             symbol_set: SymbolSet::KatakanaSymbolsLatin,
@@ -367,6 +381,8 @@ pub mod config {
             // No dim preview — the silhouette appears only as the heads
             // paint it in over the rain.
             overlay_skip_preview: true,
+            // Bane keeps its fixed crimson tint, not image-sampled colour.
+            overlay_sample_color: false,
             speed_range: (3, 11),
             // Sparse field. 0.5 sits clearly below every other variant
             // and above the 0.3 sanitize floor.
@@ -714,6 +730,11 @@ pub mod renderer {
         pub position_size: [f32; 4],
         pub uv_rect: [f32; 4],
         pub params: [f32; 4],
+        /// Per-instance overlay colour (rgb in .xyz, .w unused). Only
+        /// consulted by the glyph shader for overlay-flagged glyphs when
+        /// the sample-colour flag is set (film variants); rain, ghosts,
+        /// and fixed-tint overlays (bane) leave it zeroed and unused.
+        pub color: [f32; 4],
     }
 
     pub fn plan_frame(
@@ -799,6 +820,7 @@ pub mod renderer {
                 position_size: [x, y, size, size],
                 uv_rect: [glyph.u0, glyph.v0, glyph.u1, glyph.v1],
                 params: [brightness.min(1.0), head_boost, noise, 0.0],
+                color: [0.0; 4],
             });
         }
 
@@ -1080,6 +1102,7 @@ impl CoreRuntime {
                 gpu::GlyphTints {
                     field: glyph_tint,
                     overlay: overlay_tint,
+                    sample_overlay_color: self.runtime_config.overlay_sample_color,
                 },
                 style_params,
                 self.animation_seconds,
@@ -1287,14 +1310,17 @@ mod tests {
         assert_eq!(runtime.overlay_subdir, Some("bane"));
         assert!(runtime.overlay_full_pitch);
         assert!(runtime.overlay_skip_preview);
+        // Bane uses its fixed crimson tint, not image-sampled colour.
+        assert!(!runtime.overlay_sample_color);
         // Films keep the field colour, dense half-pitch packing, and the
         // dim preview (no rendering overrides), but each now leads its
-        // overlay queue with its own per-film subdir.
+        // overlay queue with its own per-film subdir and samples colour.
         let original = config::variant_by_key("original").unwrap().to_runtime(22);
         assert_eq!(original.overlay_tint, original.color);
         assert_eq!(original.overlay_subdir, Some("original"));
         assert!(!original.overlay_full_pitch);
         assert!(!original.overlay_skip_preview);
+        assert!(original.overlay_sample_color);
     }
 
     #[test]
@@ -1554,6 +1580,7 @@ mod tests {
                 volatile_last: 1.0,
                 super_volatile: true,
                 frozen: true,
+                overlay_color: [0.0; 3],
             }],
             ghosts: Vec::new(),
         };

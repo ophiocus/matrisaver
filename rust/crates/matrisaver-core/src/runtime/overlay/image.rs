@@ -1,17 +1,22 @@
 // Overlay image sampling, luminance preprocessing, and glyph index mapping.
 impl CoreRuntime {
+    /// Returns `(alpha, luminance, [r, g, b])` for a grid cell, 4x
+    /// supersampled. The RGB is the cell's average colour (0..1), used by
+    /// sample-colour variants so the painted glyphs carry the source
+    /// scene's hues; alpha/luminance drive the silhouette and density.
     fn sample_overlay_cell(
         image: &image::RgbaImage,
         grid: CellGrid,
         cell_col: u32,
         cell_row: u32,
         luma_weights: (f32, f32, f32),
-    ) -> (f32, f32) {
+    ) -> (f32, f32, [f32; 3]) {
         let width = image.width();
         let height = image.height();
         let offsets = [(-0.25f32, -0.25f32), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)];
         let mut alpha_sum = 0.0;
         let mut luma_sum = 0.0;
+        let mut rgb_sum = [0.0f32; 3];
         let mut weight_sum = 0.0;
         for (ox, oy) in offsets {
             let sx = ((cell_col as f32 + 0.5 + ox) / grid.cols as f32) * width as f32;
@@ -27,12 +32,23 @@ impl CoreRuntime {
                 .clamp(0.0, 1.0);
             alpha_sum += alpha;
             luma_sum += luminance;
+            rgb_sum[0] += r;
+            rgb_sum[1] += g;
+            rgb_sum[2] += b;
             weight_sum += 1.0;
         }
         if weight_sum <= 0.0 {
-            return (0.0, 0.0);
+            return (0.0, 0.0, [0.0; 3]);
         }
-        (alpha_sum / weight_sum, luma_sum / weight_sum)
+        (
+            alpha_sum / weight_sum,
+            luma_sum / weight_sum,
+            [
+                rgb_sum[0] / weight_sum,
+                rgb_sum[1] / weight_sum,
+                rgb_sum[2] / weight_sum,
+            ],
+        )
     }
 
     /// Optional contrast-normalization: percentile-based luminance

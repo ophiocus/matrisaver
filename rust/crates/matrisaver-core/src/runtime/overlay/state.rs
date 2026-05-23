@@ -132,6 +132,7 @@ impl CoreRuntime {
                         if let Some(cell) = column.row_cells.get_mut(target.row_index) {
                             cell.glyph_index = Some(target.glyph_index);
                             cell.brightness = target.brightness;
+                            cell.overlay_color = target.color;
                             cell.volatile = false;
                             cell.volatile_next = 0.0;
                             cell.volatile_last = 0.0;

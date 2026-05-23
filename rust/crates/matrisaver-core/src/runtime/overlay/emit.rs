@@ -39,6 +39,7 @@ impl CoreRuntime {
                     hash01(glyph.column_slot, (glyph.row_index as u32) ^ self.frame_index as u32),
                     4.0,
                 ],
+                color: [glyph.color[0], glyph.color[1], glyph.color[2], 0.0],
             });
         }
     }
@@ -76,6 +77,8 @@ impl CoreRuntime {
                     hash01(header.column_slot, self.frame_index as u32),
                     4.0,
                 ],
+                // Painting heads stay the bright leading edge, not tinted.
+                color: [0.0; 4],
             });
         }
     }

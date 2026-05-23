@@ -177,6 +177,18 @@ impl CoreRuntime {
                 style_tag += 4.0;
             }
             let x = (column.column_slot as f32 + 0.5) * column_pitch;
+            // Frozen overlay cells carry the colour sampled from the
+            // source image; the shader uses it for sample-colour variants.
+            let overlay_color = if row_cell.frozen {
+                [
+                    row_cell.overlay_color[0],
+                    row_cell.overlay_color[1],
+                    row_cell.overlay_color[2],
+                    0.0,
+                ]
+            } else {
+                [0.0; 4]
+            };
             instances.push(renderer::GlyphInstance {
                 position_size: [
                     x,
@@ -186,6 +198,7 @@ impl CoreRuntime {
                 ],
                 uv_rect: [glyph.u0, glyph.v0, glyph.u1, glyph.v1],
                 params: [brightness, head_boost, grain, style_tag],
+                color: overlay_color,
             });
         }
 
@@ -210,6 +223,7 @@ impl CoreRuntime {
                 ],
                 uv_rect: [glyph.u0, glyph.v0, glyph.u1, glyph.v1],
                 params: [0.18, 0.03, 0.2, 2.0],
+                color: [0.0; 4],
             });
         }
     }
