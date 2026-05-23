@@ -141,7 +141,7 @@ impl CoreRuntime {
             slot_to_column.insert(column.column_slot, index);
         }
 
-        let glyph_lookup = self.overlay_glyph_lookup();
+        let coverage_ramp = self.atlas.coverage_ramp();
         let mut per_column_targets: std::collections::HashMap<usize, ColumnRowTargets> =
             std::collections::HashMap::new();
         let mut intro_targets: std::collections::HashMap<(u32, usize, u32), (u32, f32)> =
@@ -162,7 +162,9 @@ impl CoreRuntime {
                 } else {
                     raw_luminance.clamp(0.0, 1.0)
                 };
-                let glyph_index = Self::overlay_glyph_index_for_luminance(shaped, &glyph_lookup);
+                let variety = cell_col.wrapping_mul(73_856_093) ^ cell_row.wrapping_mul(19_349_663);
+                let glyph_index =
+                    Self::overlay_glyph_index_by_coverage(shaped, &coverage_ramp, variety);
                 let Some(glyph_index) = glyph_index else {
                     continue;
                 };
@@ -221,9 +223,13 @@ impl CoreRuntime {
                         } else {
                             dense_luma[dense_index].clamp(0.0, 1.0)
                         };
-                        let Some(dense_glyph_index) =
-                            Self::overlay_glyph_index_for_luminance(dense_shaped, &glyph_lookup)
-                        else {
+                        let dense_variety = dense_col.wrapping_mul(83_492_791)
+                            ^ cell_row.wrapping_mul(28_572_539);
+                        let Some(dense_glyph_index) = Self::overlay_glyph_index_by_coverage(
+                            dense_shaped,
+                            &coverage_ramp,
+                            dense_variety,
+                        ) else {
                             continue;
                         };
                         let dense_brightness = (tuning.brightness_floor

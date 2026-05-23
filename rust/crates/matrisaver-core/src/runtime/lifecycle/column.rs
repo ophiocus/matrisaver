@@ -166,7 +166,16 @@ impl CoreRuntime {
             let glyph = glyphs[glyph_index as usize % glyphs.len()];
             let head_boost = brightness.powf(1.4).clamp(0.0, 1.0);
             let grain = hash01(column.column_slot, row_index as u32);
-            let style_tag = if row_cell.volatile { 1.0 } else { 0.0 };
+            // 0 = normal, 1 = volatile; +4.0 flags an overlay cell (the
+            // frozen locked cells that hold the painted silhouette during
+            // HOLD), which makes the glyph shader pick overlay_tint. A
+            // no-op for variants whose overlay_tint equals the field
+            // colour; the `bane` variant uses it to render the silhouette
+            // crimson over the dim green field.
+            let mut style_tag = if row_cell.volatile { 1.0 } else { 0.0 };
+            if row_cell.frozen {
+                style_tag += 4.0;
+            }
             let x = (column.column_slot as f32 + 0.5) * column_pitch;
             instances.push(renderer::GlyphInstance {
                 position_size: [

@@ -36,3 +36,9 @@ assets/assets/
 # Runtime/validation artifacts are local-only by default.
 artifacts/*
 !artifacts/readme.md
+
+# Bane reference frames — Warner Bros. film stills, DEV-ONLY source for
+# deriving the local silhouette mask (assets/overlays/bane/, itself
+# ignored above). Never commit (© WB). The shipping silhouette must be
+# original Rogers-v-Grimaldi art, not a traced frame.
+/bane/

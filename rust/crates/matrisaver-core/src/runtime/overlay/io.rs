@@ -104,6 +104,22 @@ impl CoreRuntime {
         let mut seen = std::collections::HashSet::<std::ffi::OsString>::new();
         let mut paths = Vec::new();
 
+        // Variant-pinned overlay (e.g. `bane`): when a variant names an
+        // overlay subdirectory, use ONLY that directory so the film-
+        // specific silhouette isn't mixed with the default overlay pack
+        // or user-configured directories. Walk every overlays-root
+        // candidate (ProgramData pack root + the legacy-resolved root)
+        // and collect the subdir under each.
+        if let Some(subdir) = self.runtime_config.overlay_subdir {
+            for root in self.overlay_root_candidates() {
+                let dir = root.join(subdir);
+                if dir.is_dir() {
+                    Self::collect_overlay_dir(&dir, false, &mut seen, &mut paths);
+                }
+            }
+            return paths;
+        }
+
         for source in &self.settings.overlay_directories {
             if source.enabled {
                 Self::collect_overlay_dir(
@@ -126,6 +142,21 @@ impl CoreRuntime {
         }
 
         paths
+    }
+
+    /// Overlays-root candidates a variant-pinned subdirectory can live
+    /// under: the ProgramData pack root (installed MSI) and the
+    /// legacy-resolved root (dev / source tree). Both are joined with
+    /// the variant subdir by `overlay_image_paths`.
+    fn overlay_root_candidates(&self) -> Vec<std::path::PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(pack) = Self::programdata_overlays_dir() {
+            roots.push(pack);
+        }
+        if let Some(legacy) = self.resolve_overlay_directory() {
+            roots.push(legacy);
+        }
+        roots
     }
 
     fn resolve_overlay_directory(&self) -> Option<std::path::PathBuf> {
@@ -167,14 +198,6 @@ impl CoreRuntime {
         }
 
         None
-    }
-
-    fn overlay_glyph_lookup(&self) -> Vec<(char, u32)> {
-        let mut lookup = Vec::new();
-        for (index, glyph) in self.atlas.glyphs.iter().enumerate() {
-            lookup.push((glyph.glyph, index as u32));
-        }
-        lookup
     }
 
     /// Idempotent per-session writability probe. Writes a zero-byte

@@ -72,28 +72,30 @@ impl CoreRuntime {
         ((value - low) / (high - low)).clamp(0.0, 1.0)
     }
 
-    fn overlay_glyph_index_for_luminance(luminance: f32, glyph_lookup: &[(char, u32)]) -> Option<u32> {
-        if glyph_lookup.is_empty() {
-            return None;
+    /// Map a target tone (0 = dark, 1 = bright) to an atlas glyph index
+    /// using the coverage-ranked ramp built from the embedded font
+    /// ([`GlyphAtlas::coverage_ramp`]). Higher tone picks denser glyphs,
+    /// so the silhouette's bright regions fill with heavy katakana and
+    /// dim regions with sparse marks — a true tonal ramp rather than the
+    /// old hardcoded ASCII punctuation string. A per-cell `variety` seed
+    /// jitters the choice within a small tonal window so equal-tone cells
+    /// don't tile the identical glyph, keeping the Matrix-code texture
+    /// alive while staying tonally faithful.
+    fn overlay_glyph_index_by_coverage(tone: f32, ramp: &[(f32, u32)], variety: u32) -> Option<u32> {
+        match ramp.len() {
+            0 => None,
+            1 => Some(ramp[0].1),
+            len => {
+                let t = tone.clamp(0.0, 1.0);
+                let base = t * (len - 1) as f32;
+                // Window scales with ramp size; clamped so variety never
+                // overwhelms tonal accuracy.
+                let window = ((len as f32) * 0.08).clamp(1.0, 4.0);
+                let jitter = (hash01(variety, 0x00C0_FFEE) * 2.0 - 1.0) * window;
+                let idx = (base + jitter).round().clamp(0.0, (len - 1) as f32) as usize;
+                Some(ramp[idx].1)
+            }
         }
-        let gradient = OVERLAY_DENSITY_GLYPHS.as_bytes();
-        if gradient.is_empty() {
-            return Some(glyph_lookup[0].1);
-        }
-        let gradient_index = ((luminance.clamp(0.0, 1.0) * (gradient.len() - 1) as f32).round()
-            as usize)
-            .min(gradient.len() - 1);
-        let desired = gradient[gradient_index] as char;
-        if let Some((_, index)) = glyph_lookup.iter().find(|(glyph, _)| *glyph == desired) {
-            return Some(*index);
-        }
-        if let Some((_, index)) = glyph_lookup.iter().find(|(glyph, _)| *glyph == '*') {
-            return Some(*index);
-        }
-        if let Some((_, index)) = glyph_lookup.iter().find(|(glyph, _)| *glyph == '+') {
-            return Some(*index);
-        }
-        Some(glyph_lookup[(gradient_index * glyph_lookup.len() / gradient.len()).min(glyph_lookup.len() - 1)].1)
     }
 
     fn sanitize_trace_token(raw: &str) -> String {

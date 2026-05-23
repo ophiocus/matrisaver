@@ -70,6 +70,20 @@ pub mod config {
         pub key: &'static str,
         pub name: &'static str,
         pub color: Color,
+        /// Optional second tint for overlay-painted glyphs (silhouette
+        /// intro, painting headers, frozen locked cells). `None` means
+        /// "use the field colour" — overlay glyphs render the same as
+        /// the rain, matching pre-v0.3.4 behaviour. `Some(rgb)` recolours
+        /// just the overlay (the `bane` variant uses crimson so the
+        /// painted silhouette reads red over the dim green field).
+        pub overlay_tint: Option<Color>,
+        /// Optional variant-pinned overlay subdirectory (relative to the
+        /// overlays root). `Some("bane")` makes the variant draw ONLY
+        /// from `assets/overlays/bane/` (or the ProgramData equivalent),
+        /// ignoring the default overlay pack and any user-configured
+        /// directories — so the film-specific silhouette is the only
+        /// thing painted. `None` uses the normal overlay resolution chain.
+        pub overlay_subdir: Option<&'static str>,
         pub speed_range: (u8, u8),
         pub density: f32,
         pub symbol_set: SymbolSet,
@@ -94,6 +108,14 @@ pub mod config {
     #[derive(Debug, Clone, PartialEq)]
     pub struct RuntimeConfig {
         pub color: Color,
+        /// Resolved overlay tint (always concrete — `VariantConfig`'s
+        /// `None` collapses to `color` here, so the renderer can read it
+        /// unconditionally). Equal to `color` for every variant except
+        /// `bane`, which carries crimson.
+        pub overlay_tint: Color,
+        /// Variant-pinned overlay subdirectory, propagated from
+        /// `VariantConfig`. `Some("bane")` = use only that overlay dir.
+        pub overlay_subdir: Option<&'static str>,
         pub speed_range: (u8, u8),
         pub density: f32,
         pub symbols: String,
@@ -120,6 +142,8 @@ pub mod config {
         pub fn to_runtime(self, char_size: u16) -> RuntimeConfig {
             RuntimeConfig {
                 color: self.color,
+                overlay_tint: self.overlay_tint.unwrap_or(self.color),
+                overlay_subdir: self.overlay_subdir,
                 speed_range: self.speed_range,
                 density: self.density,
                 symbols: self.symbol_set.materialize(),
@@ -161,7 +185,7 @@ pub mod config {
         }
     }
 
-    pub const VARIANTS: [VariantConfig; 4] = [
+    pub const VARIANTS: [VariantConfig; 5] = [
         VariantConfig {
             key: "original",
             // 1999 green calibration: a small red lift warms the pure
@@ -172,6 +196,8 @@ pub mod config {
             // pushed DVD "puke green" is the failure mode to avoid.
             name: "The Matrix (1999)",
             color: (35, 235, 65),
+            overlay_tint: None,
+            overlay_subdir: None,
             speed_range: (4, 10),
             density: 1.0,
             symbol_set: SymbolSet::KatakanaSymbols,
@@ -199,6 +225,8 @@ pub mod config {
             key: "reloaded",
             name: "The Matrix Reloaded (2003)",
             color: (0, 255, 90),
+            overlay_tint: None,
+            overlay_subdir: None,
             speed_range: (6, 14),
             density: 0.9,
             symbol_set: SymbolSet::KatakanaSymbolsLatin,
@@ -223,6 +251,8 @@ pub mod config {
             key: "revolutions",
             name: "The Matrix Revolutions (2003)",
             color: (0, 230, 70),
+            overlay_tint: None,
+            overlay_subdir: None,
             speed_range: (3, 16),
             density: 0.75,
             symbol_set: SymbolSet::KatakanaSymbols,
@@ -247,6 +277,8 @@ pub mod config {
             key: "resurrections",
             name: "The Matrix Resurrections (2021)",
             color: (0, 220, 150),
+            overlay_tint: None,
+            overlay_subdir: None,
             speed_range: (5, 12),
             density: 0.85,
             symbol_set: SymbolSet::KatakanaSymbolsLatin,
@@ -260,6 +292,53 @@ pub mod config {
             gamma_range: (0.7, 1.3),
             bloom_range: (0.2, 0.9),
             head_bloom: 2.2,
+            font_strength: 1.0,
+            pipeline: Pipeline::OpenGl,
+            vfx_glow_strength: 1.2,
+            vfx_glow_radius: 1.8,
+            vfx_glow_threshold: 0.55,
+            vfx_gamma: 1.1,
+        },
+        VariantConfig {
+            // Revolutions Bane-defeat (registry performance #6). This
+            // entry is ONLY the background field: a faint, sparse, dim
+            // green rain. The crimson Bane silhouette is layered on top
+            // at runtime via the overlay path + a second red-tinted
+            // draw pass (approach A) — it is NOT encoded in this table.
+            // Reference frames are pure black with the figure as the
+            // sole luminous element; the dim field + low density keep
+            // the green from competing with the red hero.
+            key: "bane",
+            name: "Revolutions — Bane (2003)",
+            // Dim emerald: well below the 1999 (35,235,65) and
+            // Revolutions (0,230,70) head greens so the field reads as
+            // a quiet substrate, not a feature.
+            color: (12, 130, 45),
+            // Crimson overlay — the painted Bane silhouette (intro
+            // glyphs, headers, frozen locked cells) renders red over the
+            // dim green field. Saturated red with a hair of green so it
+            // doesn't clip to pure (255,0,0); the head-HDR boost lifts the
+            // hot cores well above 1.0 so the mip-chain bloom blooms it.
+            overlay_tint: Some((255, 18, 14)),
+            // Draw only the Bane silhouette mask, not the default pack.
+            overlay_subdir: Some("bane"),
+            speed_range: (3, 11),
+            // Sparse field. 0.5 sits clearly below every other variant
+            // and above the 0.3 sanitize floor.
+            density: 0.5,
+            symbol_set: SymbolSet::KatakanaSymbols,
+            // Dim glow to match — the bright halo budget is reserved
+            // for the red overlay glyphs, not the green field.
+            glow_color: (90, 200, 110),
+            pause_chance: 0.05,
+            jitter_chance: 0.08,
+            ghost_chance: 0.18,
+            ghost_swap_multiplier: 11.0,
+            trail_length_multiplier: 1.5,
+            volatile_chance: 0.4,
+            gamma_range: (0.7, 1.3),
+            bloom_range: (0.2, 0.9),
+            head_bloom: 2.0,
             font_strength: 1.0,
             pipeline: Pipeline::OpenGl,
             vfx_glow_strength: 1.2,
@@ -449,6 +528,7 @@ pub mod config {
 
 pub mod renderer {
     use crate::config::GlowQuality;
+    use ab_glyph::{point, Font, FontArc, FontRef, Glyph};
     use bytemuck::{Pod, Zeroable};
 
     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -458,6 +538,14 @@ pub mod renderer {
         pub v0: f32,
         pub u1: f32,
         pub v1: f32,
+        /// Fraction of the glyph cell the rasterised outline inks, in
+        /// `0.0..~1.0` (anti-aliased coverage summed over the cell and
+        /// divided by the cell area). Measured once at atlas build with
+        /// the same embedded font the GPU rasterises. This is what lets
+        /// the overlay image→glyph mapper choose glyphs by *actual* ink
+        /// density (proper tonal ramp) instead of a hardcoded ASCII
+        /// punctuation ramp. Blank/whitespace glyphs are ~0.0.
+        pub coverage: f32,
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -478,6 +566,12 @@ pub mod renderer {
                 .max(glyph_size);
             let texture_height = (rows * glyph_size).min(max_texture_size).max(glyph_size);
 
+            // Load the same embedded font the GPU rasterises so the
+            // measured coverage matches what actually gets drawn. If it
+            // fails to load we fall back to a neutral 0.5 coverage for
+            // every glyph (the GPU would be drawing placeholders anyway).
+            let font = Self::embedded_font();
+
             let mut glyphs = Vec::with_capacity(unique.len());
             for (index, glyph) in unique.iter().enumerate() {
                 let idx = index as u16;
@@ -487,12 +581,17 @@ pub mod renderer {
                 let py = (row * glyph_size) as f32;
                 let tw = texture_width as f32;
                 let th = texture_height as f32;
+                let coverage = font
+                    .as_ref()
+                    .map(|font| Self::glyph_coverage(font, *glyph, glyph_size as f32))
+                    .unwrap_or(0.5);
                 glyphs.push(AtlasGlyph {
                     glyph: *glyph,
                     u0: px / tw,
                     v0: py / th,
                     u1: (px + glyph_size as f32) / tw,
                     v1: (py + glyph_size as f32) / th,
+                    coverage,
                 });
             }
 
@@ -501,6 +600,59 @@ pub mod renderer {
                 texture_size: (texture_width, texture_height),
                 glyphs,
             }
+        }
+
+        fn embedded_font() -> Option<FontArc> {
+            const CJK_FONT_BYTES: &[u8] =
+                include_bytes!("../../../../assets/fonts/NotoSansCJK-Regular.ttc");
+            FontArc::try_from_slice(CJK_FONT_BYTES).ok().or_else(|| {
+                FontRef::try_from_slice_and_index(CJK_FONT_BYTES, 0)
+                    .ok()
+                    .map(FontArc::new)
+            })
+        }
+
+        /// Anti-aliased ink coverage of a glyph in its cell, in
+        /// `0.0..~1.0`. Sums per-pixel coverage from the rasterised
+        /// outline and divides by the cell area. Mirrors the GPU
+        /// `draw_font_cell` scale (`glyph_size * 0.98`) so the measured
+        /// density tracks what's drawn. Whitespace / outline-less glyphs
+        /// return 0.0.
+        fn glyph_coverage(font: &FontArc, glyph_char: char, glyph_size: f32) -> f32 {
+            let scale_value = (glyph_size * 0.98).max(4.0);
+            let scale = ab_glyph::PxScale {
+                x: scale_value,
+                y: scale_value,
+            };
+            let glyph = Glyph {
+                id: font.glyph_id(glyph_char),
+                scale,
+                position: point(0.0, 0.0),
+            };
+            let Some(outline) = font.outline_glyph(glyph) else {
+                return 0.0;
+            };
+            let mut sum = 0.0f32;
+            outline.draw(|_x, _y, coverage| sum += coverage);
+            let cell_area = (glyph_size * glyph_size).max(1.0);
+            (sum / cell_area).clamp(0.0, 1.0)
+        }
+
+        /// Atlas glyph indices sorted by ascending ink coverage, with
+        /// near-blank glyphs (whitespace) dropped. This is the tonal
+        /// ramp the overlay mapper indexes into: low luminance picks
+        /// sparse glyphs, high luminance picks dense ones. Computed from
+        /// real measured coverage rather than a hardcoded ASCII string.
+        pub fn coverage_ramp(&self) -> Vec<(f32, u32)> {
+            let mut ramp: Vec<(f32, u32)> = self
+                .glyphs
+                .iter()
+                .enumerate()
+                .filter(|(_, glyph)| glyph.coverage > 0.02)
+                .map(|(index, glyph)| (glyph.coverage, index as u32))
+                .collect();
+            ramp.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            ramp
         }
     }
 
@@ -564,6 +716,7 @@ pub mod renderer {
             v0: 0.0,
             u1: 1.0,
             v1: 1.0,
+            coverage: 0.0,
         };
         let glyphs = if atlas.glyphs.is_empty() {
             std::slice::from_ref(&fallback_glyph)
@@ -870,10 +1023,19 @@ impl CoreRuntime {
                 color.1 as f32 / 255.0,
                 color.2 as f32 / 255.0,
             ];
+            let overlay = self.runtime_config.overlay_tint;
+            let overlay_tint = [
+                overlay.0 as f32 / 255.0,
+                overlay.1 as f32 / 255.0,
+                overlay.2 as f32 / 255.0,
+            ];
             gpu.draw_instanced_pass(
                 &instances,
                 frame_plan.downsample_factor,
-                glyph_tint,
+                gpu::GlyphTints {
+                    field: glyph_tint,
+                    overlay: overlay_tint,
+                },
                 style_params,
                 self.animation_seconds,
                 gpu::VfxRenderParams {
@@ -1045,7 +1207,13 @@ mod tests {
         let keys: Vec<&str> = config::VARIANTS.iter().map(|variant| variant.key).collect();
         assert_eq!(
             keys,
-            vec!["original", "reloaded", "revolutions", "resurrections"]
+            vec![
+                "original",
+                "reloaded",
+                "revolutions",
+                "resurrections",
+                "bane"
+            ]
         );
     }
 
@@ -1058,6 +1226,63 @@ mod tests {
         assert_eq!(runtime.color, (35, 235, 65));
         assert_eq!(runtime.pipeline, config::Pipeline::OpenGl);
         assert!((runtime.density - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bane_variant_resolves_crimson_overlay_and_subdir() {
+        let variant = config::variant_by_key("bane").expect("bane variant is missing");
+        let runtime = variant.to_runtime(22);
+        // Dim green field, crimson overlay — two distinct colours so the
+        // painted silhouette reads red over the rain.
+        assert_eq!(runtime.color, (12, 130, 45));
+        assert_eq!(runtime.overlay_tint, (255, 18, 14));
+        assert_ne!(runtime.color, runtime.overlay_tint);
+        // Variant pins its own overlay directory.
+        assert_eq!(runtime.overlay_subdir, Some("bane"));
+        // Films keep the field colour for overlays (no recolour).
+        let original = config::variant_by_key("original").unwrap().to_runtime(22);
+        assert_eq!(original.overlay_tint, original.color);
+        assert_eq!(original.overlay_subdir, None);
+    }
+
+    #[test]
+    fn bane_overlay_injects_silhouette_when_mask_present() {
+        // The Bane mask is a DEV-only, gitignored asset. In CI (and any
+        // fresh clone) it's absent, so skip cleanly rather than fail.
+        let mask = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("assets")
+            .join("overlays")
+            .join("bane")
+            .join("bane-hold.png");
+        if !mask.exists() {
+            eprintln!("skipping: bane mask absent at {}", mask.display());
+            return;
+        }
+        let settings = config::Settings {
+            variant: "bane".to_owned(),
+            ..config::Settings::default()
+        };
+        let mut runtime = CoreRuntime::new(settings);
+        runtime.set_surface_size(1920, 1080);
+        // Drive ~22s of frames: past the 8s initial trigger, past the 8s
+        // active-hold, and into the painting phase where headers freeze
+        // silhouette cells (which is what bumps overlay_injected_count).
+        for _ in 0..(60 * 22) {
+            runtime.tick(1.0 / 60.0);
+        }
+        assert!(
+            runtime.overlay_injected_count > 0,
+            "bane overlay never painted any cells (count=0); image={}",
+            runtime.overlay_image_name
+        );
+        assert!(
+            runtime.overlay_image_name.contains("bane"),
+            "overlay injected from unexpected image: {}",
+            runtime.overlay_image_name
+        );
     }
 
     #[test]
@@ -1247,16 +1472,43 @@ mod tests {
     }
 
     #[test]
-    fn overlay_ascii_fallback_picks_available_glyph() {
-        let lookup = vec![('.', 0), ('*', 1), ('+', 2)];
+    fn overlay_coverage_ramp_maps_tone_to_density() {
+        // Ramp ascending by coverage. Dark tone -> sparse glyph, bright
+        // tone -> dense glyph. The per-cell variety jitter stays within a
+        // small window, so assert tonal *bands* rather than exact glyphs.
+        let ramp = vec![(0.05f32, 7u32), (0.30, 3), (0.55, 9), (0.85, 1)];
+        let cov = |idx: u32| ramp.iter().find(|(_, i)| *i == idx).unwrap().0;
+        for seed in 0..32u32 {
+            let dark = CoreRuntime::overlay_glyph_index_by_coverage(0.0, &ramp, seed).unwrap();
+            assert!(cov(dark) <= 0.30, "dark tone must map to a sparse glyph");
+            let bright = CoreRuntime::overlay_glyph_index_by_coverage(1.0, &ramp, seed).unwrap();
+            assert!(cov(bright) >= 0.55, "bright tone must map to a dense glyph");
+        }
+        // Empty ramp yields nothing; single-entry ramp yields that entry.
         assert_eq!(
-            CoreRuntime::overlay_glyph_index_for_luminance(0.0, &lookup),
-            Some(0)
+            CoreRuntime::overlay_glyph_index_by_coverage(0.5, &[], 0),
+            None
         );
         assert_eq!(
-            CoreRuntime::overlay_glyph_index_for_luminance(1.0, &lookup),
-            Some(1)
+            CoreRuntime::overlay_glyph_index_by_coverage(0.5, &[(0.4, 42)], 0),
+            Some(42)
         );
+    }
+
+    #[test]
+    fn coverage_ramp_is_sorted_and_drops_blanks() {
+        // A real atlas: coverage measured, ramp ascending, blanks gone.
+        let atlas = renderer::GlyphAtlas::from_symbols("ABCﾊﾐ 0", 24, 1024);
+        let ramp = atlas.coverage_ramp();
+        assert!(!ramp.is_empty(), "ramp should have inked glyphs");
+        for pair in ramp.windows(2) {
+            assert!(pair[0].0 <= pair[1].0, "ramp must be ascending by coverage");
+        }
+        // The space character inks ~nothing and must be excluded.
+        for &(coverage, index) in &ramp {
+            assert!(coverage > 0.02);
+            assert_ne!(atlas.glyphs[index as usize].glyph, ' ');
+        }
     }
 
     #[test]

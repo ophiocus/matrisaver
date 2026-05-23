@@ -24,11 +24,14 @@ impl CoreRuntime {
             instances.push(renderer::GlyphInstance {
                 position_size: [x, y, intro_size, intro_size],
                 uv_rect: [atlas_glyph.u0, atlas_glyph.v0, atlas_glyph.u1, atlas_glyph.v1],
+                // style_tag 4.0 = overlay flag (+4.0 offset, sub-style 0).
+                // Picks up overlay_tint in the glyph shader; a no-op for
+                // variants whose overlay_tint equals the field colour.
                 params: [
                     glyph.brightness,
                     0.45,
                     hash01(glyph.column_slot, (glyph.row_index as u32) ^ self.frame_index as u32),
-                    0.0,
+                    4.0,
                 ],
             });
         }
@@ -60,7 +63,13 @@ impl CoreRuntime {
             instances.push(renderer::GlyphInstance {
                 position_size: [x, y + char_size as f32 * 0.5, char_size as f32, char_size as f32],
                 uv_rect: [glyph.u0, glyph.v0, glyph.u1, glyph.v1],
-                params: [brightness, 1.0, hash01(header.column_slot, self.frame_index as u32), 0.0],
+                // style_tag 4.0 = overlay flag (see intro emitter above).
+                params: [
+                    brightness,
+                    1.0,
+                    hash01(header.column_slot, self.frame_index as u32),
+                    4.0,
+                ],
             });
         }
     }

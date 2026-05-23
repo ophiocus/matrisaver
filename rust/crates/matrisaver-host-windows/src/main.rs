@@ -112,11 +112,12 @@ fn main() {
         }
     };
     let mut runtime_settings = storage::load_settings_or_default(None);
-    if let Some(glow_quality) =
-        parse_option_value(&args, "--glow-quality").and_then(parse_glow_quality)
-    {
-        runtime_settings.glow_quality = glow_quality;
-    }
+    // Honor CLI setting overrides in screensaver/preview mode too, not
+    // just in `/c` config mode. Without this, `--variant`, `--char-size`,
+    // etc. were silently dropped on `/s` and `/p`, so e.g.
+    // `... /s --variant bane` always ran whatever variant settings.json
+    // held instead of the requested one.
+    apply_cli_overrides(&mut runtime_settings, &args);
     let mut runtime = CoreRuntime::new(runtime_settings);
     runtime.set_gpu_selection(gpu_selection.clone());
     let width = parse_option_value(&args, "--width")
@@ -248,11 +249,14 @@ fn run_config_mode(args: &[String]) {
     run_config_mode_headless(args);
 }
 
-/// Pre-egui CLI handler. Kept for scripting, CI tests, and non-Windows
-/// builds. Display Properties never reaches this path now.
-fn run_config_mode_headless(args: &[String]) {
-    let mut settings = storage::load_settings_or_default(None);
-
+/// Apply command-line setting overrides onto a loaded `Settings`.
+/// Shared by the screensaver/preview path and the headless config path
+/// so `--variant`, `--pipeline`, `--glow-quality`, `--char-size`, and
+/// the overlay/performance/monitor toggles behave identically in `/s`,
+/// `/p`, and `/c`. Before this existed, only `/c` honored them, so a
+/// `... /s --variant bane` invocation silently ran the settings.json
+/// variant instead of the one requested on the command line.
+fn apply_cli_overrides(settings: &mut matrisaver_core::config::Settings, args: &[String]) {
     if let Some(variant) = parse_option_value(args, "--variant") {
         settings.variant = variant.to_owned();
     }
@@ -283,6 +287,14 @@ fn run_config_mode_headless(args: &[String]) {
     if let Some(char_size) = parse_option_value(args, "--char-size").and_then(parse_u16) {
         settings.char_size = char_size;
     }
+}
+
+/// Pre-egui CLI handler. Kept for scripting, CI tests, and non-Windows
+/// builds. Display Properties never reaches this path now.
+fn run_config_mode_headless(args: &[String]) {
+    let mut settings = storage::load_settings_or_default(None);
+
+    apply_cli_overrides(&mut settings, args);
 
     let sanitized = settings.sanitize();
     match storage::save_settings(&sanitized, None) {

@@ -80,6 +80,16 @@ struct GlobalUniform {
     /// phosphor decay, ACES exposure, etc.) — keep them zero for now
     /// so the shader is forwards-compatible with older settings.
     vfx_params: [f32; 4],
+    /// Second glyph tint, applied to overlay-flagged glyphs only
+    /// (v0.3.4). Overlay glyphs are marked with a `+4.0` offset on
+    /// their per-instance `style_tag`; the shader recovers the real
+    /// sub-style and selects `mix(glyph_tint, overlay_tint, is_overlay)`
+    /// for the base colour. For every variant except `bane` the caller
+    /// sets this equal to `glyph_tint`, so overlay glyphs render in the
+    /// field colour exactly as before. The `bane` variant sets it to
+    /// crimson so the painted silhouette reads red over the dim green
+    /// field. `.w` is unused (alpha rides at 1.0).
+    overlay_tint: [f32; 4],
 }
 
 #[repr(C)]
@@ -116,13 +126,25 @@ struct PostUniform {
 // Cross-check the expectations with the WGSL `struct` declarations in
 // the shader sources — same number of bytes, same field order.
 const _: () = assert!(
-    std::mem::size_of::<GlobalUniform>() == 64,
-    "GlobalUniform must be 64 bytes — Rust struct layout drifted from the WGSL declaration"
+    std::mem::size_of::<GlobalUniform>() == 80,
+    "GlobalUniform must be 80 bytes — Rust struct layout drifted from the WGSL declaration"
 );
 const _: () = assert!(
     std::mem::size_of::<PostUniform>() == 32,
     "PostUniform must be 32 bytes — Rust struct layout drifted from the WGSL declaration"
 );
+
+/// The two glyph tints for a frame. `field` colours normal rain glyphs;
+/// `overlay` colours overlay-flagged glyphs (silhouette intro, painting
+/// headers, frozen locked cells). For every variant except `bane` the
+/// caller sets them equal, so the overlay renders in the field colour.
+/// Bundled into a struct to keep the `draw_instanced_pass` arity under
+/// the clippy `too_many_arguments` threshold.
+#[derive(Debug, Clone, Copy)]
+pub struct GlyphTints {
+    pub field: [f32; 3],
+    pub overlay: [f32; 3],
+}
 
 /// Per-frame visual-effects parameters sourced from `Settings`. Bundled
 /// into a struct so the `draw_instanced_pass` signature stays readable
@@ -222,6 +244,8 @@ const GLYPH_SHADER_WGSL: &str = "
         style_params: vec4<f32>,
         // v0.3.3 VFX knobs — .x = head_hdr_scale.
         vfx_params: vec4<f32>,
+        // v0.3.4 — second tint for overlay-flagged glyphs.
+        overlay_tint: vec4<f32>,
     };
 
     @group(0) @binding(0)
@@ -273,8 +297,16 @@ const GLYPH_SHADER_WGSL: &str = "
         let atlas_value = textureSample(atlas_tex, atlas_sampler, input.uv).r;
         let glyph_mask = smoothstep(0.15, 0.78, atlas_value);
         let edge_glint = smoothstep(0.75, 1.0, atlas_value) * input.head_boost;
-        let is_ghost = step(1.5, input.style_tag);
-        let is_volatile = step(0.5, input.style_tag) - is_ghost;
+        // v0.3.4 overlay flag. Overlay-emitted glyphs (silhouette intro,
+        // painting headers, frozen locked cells) carry a +4.0 offset on
+        // style_tag so the field rain (0/1/2 = normal/volatile/ghost) and
+        // the overlay can be tinted independently. Recover the real
+        // sub-style by subtracting the offset before the ghost/volatile
+        // tests, so an overlay glyph that is also volatile still pulses.
+        let is_overlay = step(3.5, input.style_tag);
+        let base_tag = input.style_tag - is_overlay * 4.0;
+        let is_ghost = step(1.5, base_tag);
+        let is_volatile = step(0.5, base_tag) - is_ghost;
         let pulse = (0.5 + 0.5 * sin((input.grain + input.brightness) * 18.0))
             * is_volatile
             * globals.style_params.w;
@@ -288,19 +320,29 @@ const GLYPH_SHADER_WGSL: &str = "
         let value_pulsed = clamp(value_base * (1.0 + pulse), 0.0, 1.0);
         let value_final = value_pulsed;
         let head_mix = clamp(input.head_boost * (0.65 + globals.style_params.y * 0.35), 0.0, 1.0);
-        let base_color = globals.glyph_tint.rgb;
-        let head_color = mix(base_color, vec3<f32>(0.86, 1.0, 0.92), head_mix);
+        // Field glyphs use glyph_tint; overlay-flagged glyphs use
+        // overlay_tint. For non-bane variants the caller sets the two
+        // equal, so this mix is a no-op and the field colour is unchanged.
+        let base_color = mix(globals.glyph_tint.rgb, globals.overlay_tint.rgb, is_overlay);
+        // The cool-white head wash and the green specular sheen are
+        // falling-head effects — they must NOT apply to overlay glyphs,
+        // or a bright silhouette (e.g. the lit Bane face, head_mix ~0.9)
+        // gets washed to near-white and the overlay_tint hue vanishes.
+        // Gate both by (1 - is_overlay) so overlay cells keep their tint;
+        // the HDR boost below still applies so they bloom in-colour.
+        let head_white = head_mix * (1.0 - is_overlay);
+        let head_color = mix(base_color, vec3<f32>(0.86, 1.0, 0.92), head_white);
         let ghost_color = mix(base_color * 0.28, vec3<f32>(0.08, 0.22, 0.14), 0.35);
 
         // Specular sheen on head glyphs — a tight diagonal
         // highlight band raking across the glyph, time-driven,
-        // gated by head_mix so only leading heads chrome up.
-        // (uv.x + uv.y) is the diagonal coordinate; pow() tightens
-        // the band; the cool-white tint reads as liquid-mirror
-        // rather than merely a brighter green.
+        // gated by head_white so only falling rain heads chrome up
+        // (overlay glyphs are excluded). (uv.x + uv.y) is the diagonal
+        // coordinate; pow() tightens the band; the cool-white tint
+        // reads as liquid-mirror rather than merely a brighter green.
         let sheen_phase = (input.uv.x + input.uv.y) * 3.0 - globals.time_pad.x * 2.2;
         let sheen_band = pow(max(sin(sheen_phase) * 0.5 + 0.5, 0.0), 6.0);
-        let sheen = sheen_band * head_mix * 0.6;
+        let sheen = sheen_band * head_white * 0.6;
         let head_sheened = head_color + vec3<f32>(0.55, 0.72, 0.62) * sheen;
 
         // HDR head boost — head glyphs emit super-bright
@@ -824,6 +866,9 @@ impl GpuRendererScaffold {
                 // write in draw_instanced_pass replaces these with the
                 // live Settings values from the caller.
                 vfx_params: [1.5, 0.0, 0.0, 0.0],
+                // Initial overlay tint == glyph tint (no recolour); the
+                // per-frame write supplies the live value.
+                overlay_tint: [0.0, 1.0, 0.35, 1.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1639,7 +1684,7 @@ impl GpuRendererScaffold {
         &mut self,
         instances: &[GlyphInstance],
         downsample_factor: u8,
-        glyph_tint: [f32; 3],
+        tints: GlyphTints,
         style_params: [f32; 4],
         time: f32,
         vfx: VfxRenderParams,
@@ -1660,9 +1705,10 @@ impl GpuRendererScaffold {
                     2.0 / self.surface_size.1.max(1) as f32,
                 ],
                 time_pad: [time, 0.0],
-                glyph_tint: [glyph_tint[0], glyph_tint[1], glyph_tint[2], 1.0],
+                glyph_tint: [tints.field[0], tints.field[1], tints.field[2], 1.0],
                 style_params,
                 vfx_params: [vfx.head_hdr_scale, 0.0, 0.0, 0.0],
+                overlay_tint: [tints.overlay[0], tints.overlay[1], tints.overlay[2], 1.0],
             }),
         );
 
@@ -2041,11 +2087,11 @@ mod tests {
     // size assertion below trips before pipeline creation does.
     #[test]
     fn uniform_struct_sizes_match_wgsl_declarations() {
-        // GlobalUniform: vec2 + vec2 + vec4 + vec4 + vec4
-        //              = 8 + 8 + 16 + 16 + 16 = 64 bytes.
-        // The trailing vec4 is `vfx_params` (v0.3.3) carrying
-        // head_hdr_scale in `.x` for the glyph shader.
-        assert_eq!(std::mem::size_of::<GlobalUniform>(), 64);
+        // GlobalUniform: vec2 + vec2 + vec4 + vec4 + vec4 + vec4
+        //              = 8 + 8 + 16 + 16 + 16 + 16 = 80 bytes.
+        // The trailing vec4 is `overlay_tint` (v0.3.4); `vfx_params`
+        // (v0.3.3) precedes it carrying head_hdr_scale in `.x`.
+        assert_eq!(std::mem::size_of::<GlobalUniform>(), 80);
 
         // PostUniform: vec2 + f32*5 + vec3-of-pad-as-3-scalars
         //            = 8 + 4 + 4 + 4 + 4 + 4 + 4 = 32 bytes.
