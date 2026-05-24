@@ -38,7 +38,7 @@ All file references are crate-relative under
 | Frozen-cell behavior in rain lifecycle | `runtime/lifecycle/cells.rs` | `cell.frozen` flag is honored by `write_head_row`, `erase_row`, and `update_volatile_cells` so locked overlay cells survive the rain advancing past them |
 | Constants and types | `runtime/types.rs` | `OVERLAY_*` timing/format constants (incl. `OVERLAY_CAPTURE_SETTLE_FRAMES`), `RowCell.overlay_color`, `OverlayHeader`, `OverlayIntroGlyph`/`OverlayTargetCell` (each with `color`), `OverlayIntroMode`, `OverlayTuning`, `OverlayTuningConfig` |
 | Per-variant overlay knobs | `lib.rs` (`config::VariantConfig` / `RuntimeConfig`) | `overlay_tint`, `overlay_subdir`, `overlay_full_pitch`, `overlay_skip_preview`, `overlay_sample_color` (see the V2.2 section) |
-| User-facing settings | `lib.rs` (`config::Settings`) | `overlay_enabled`, `overlay_directories: Vec<OverlaySource>`, `overlay_auto_levels` |
+| User-facing settings | `lib.rs` (`config::Settings`) | `overlay_enabled`, `overlay_directories: Vec<OverlaySource>`, `overlay_auto_levels`, `overlay_natural_color` (dialog checkbox: sample image colour vs flat tint) |
 | Headless batch tool | `scripts/overlay_megarun.ps1` | Renders a folder of images to their `.overlay.png` versions with no screen takeover |
 
 These files are `include!`'d into `lib.rs` rather than declared as sub-
@@ -217,7 +217,7 @@ overlay knobs that propagate into `RuntimeConfig`:
 | `overlay_subdir` | `Option<&str>` | Variant's pinned iconic-scene queue dir under the overlays root | `Some("bane")` | `Some(<key>)` |
 | `overlay_full_pitch` | `bool` | Paint the silhouette one glyph per image column (`column_span = 1`) instead of filling every half-char rain slot — glyphs read at rain scale instead of a dense half-pitch mat | `true` | `false` |
 | `overlay_skip_preview` | `bool` | Skip the post-injection active-hold ("dim pre-show") and suppress the intro ghost layer — the silhouette is revealed only as the painting heads sweep it in | `true` | `false` |
-| `overlay_sample_color` | `bool` | Colour overlay glyphs by sampling the source image's hue **per cell** instead of the flat `overlay_tint` | `false` | `true` |
+| `overlay_sample_color` | `bool` | Variant *capability* to colour overlay glyphs by sampling the source image's hue **per cell** instead of the flat `overlay_tint`. ANDed at the draw call with the user setting `Settings.overlay_natural_color` (default on) — off makes colour-capable variants fall back to their flat field tint; fixed-tint variants (bane) are unaffected. | `false` | `true` |
 
 `bane` is the canonical worked example: a dim, sparse green rain field
 (its own `color`/`density`) with a crimson code-silhouette painted from
@@ -591,6 +591,9 @@ Only these exit `matrisaver-core`:
 - `config::Settings.overlay_auto_levels` — V2 top-level toggle for
   the percentile contrast stretch. Wins over `overlay_tuning.json`'s
   `auto_levels_enabled` field.
+- `config::Settings.overlay_natural_color` — V2.2 dialog toggle
+  ("Natural image colour for overlays"). ANDed with each variant's
+  `overlay_sample_color` capability; default on.
 
 Everything else (state, tuning, lock list, headers, intro glyphs,
 write probe cache) is private. The host treats overlays as an

@@ -474,6 +474,26 @@ impl ConfigApp {
             .weak()
             .small(),
         );
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.working.overlay_natural_color,
+                "Natural image colour for overlays",
+            );
+        });
+        ui.label(
+            egui::RichText::new(
+                "Colour overlay glyphs with the source image's own hues. \
+                 Off renders them in the variant's field colour instead. \
+                 No effect on fixed-colour variants (e.g. Bane stays red).",
+            )
+            .weak()
+            .small(),
+        );
     }
 
     fn render_advanced(&mut self, ui: &mut egui::Ui) {

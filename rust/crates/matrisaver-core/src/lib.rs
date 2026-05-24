@@ -458,6 +458,14 @@ pub mod config {
         /// ASCII-conversion practice).
         #[serde(default)]
         pub overlay_auto_levels: bool,
+        /// User toggle for sampling overlay glyph colour from the source
+        /// image's natural hues. ANDed with each variant's
+        /// `overlay_sample_color` capability: when off, colour-capable
+        /// variants (the films) fall back to their flat field tint;
+        /// fixed-tint variants (bane crimson) are unaffected either way.
+        /// Defaults on so the chromatic overlays show out of the box.
+        #[serde(default = "default_overlay_natural_color")]
+        pub overlay_natural_color: bool,
         // ── Visual-effects knobs (v0.3.3) ────────────────────────────
         //
         // Exposed in the admin panel after v0.3.0/v0.3.1/v0.3.2 made
@@ -523,6 +531,7 @@ pub mod config {
                 char_size: 22,
                 overlay_directories: Vec::new(),
                 overlay_auto_levels: false,
+                overlay_natural_color: default_overlay_natural_color(),
                 vfx_head_hdr_scale: default_vfx_head_hdr_scale(),
                 vfx_bloom_threshold: default_vfx_bloom_threshold(),
                 vfx_bloom_intensity: default_vfx_bloom_intensity(),
@@ -533,6 +542,10 @@ pub mod config {
 
     fn default_glow_quality() -> GlowQuality {
         GlowQuality::Balanced
+    }
+
+    fn default_overlay_natural_color() -> bool {
+        true
     }
 
     // v0.3.3 VFX/overlay knob defaults — named functions so #[serde(default = "...")]
@@ -1116,7 +1129,12 @@ impl CoreRuntime {
                 gpu::GlyphTints {
                     field: glyph_tint,
                     overlay: overlay_tint,
-                    sample_overlay_color: self.runtime_config.overlay_sample_color,
+                    // Variant capability AND the user's natural-colour
+                    // toggle: colour-capable variants sample image hues
+                    // only when the user leaves it on; fixed-tint variants
+                    // (bane) ignore it.
+                    sample_overlay_color: self.runtime_config.overlay_sample_color
+                        && self.settings.overlay_natural_color,
                 },
                 style_params,
                 self.animation_seconds,
@@ -1470,6 +1488,7 @@ mod tests {
                 write_ascii_alongside: true,
             }],
             overlay_auto_levels: true,
+            overlay_natural_color: false,
             // v0.3.3 VFX/overlay knobs — exercise non-default values so
             // serde round-trip is verified for the new fields too.
             vfx_head_hdr_scale: 2.2,
