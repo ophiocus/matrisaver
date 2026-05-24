@@ -482,14 +482,15 @@ impl ConfigApp {
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut self.working.overlay_natural_color,
-                "Natural image colour for overlays",
+                "Overlay colour from image (off = screen green)",
             );
         });
         ui.label(
             egui::RichText::new(
-                "Colour overlay glyphs with the source image's own hues. \
-                 Off renders them in the variant's field colour instead. \
-                 No effect on fixed-colour variants (e.g. Bane stays red).",
+                "Chromatic policy for overlays. On: glyphs take the source \
+                 image's own natural hues. Off: glyphs render in the screen's \
+                 Matrix green (the variant's field colour). Fixed-tint variants \
+                 (e.g. Bane's crimson when run as the Bane variant) ignore it.",
             )
             .weak()
             .small(),
