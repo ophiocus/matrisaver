@@ -679,7 +679,7 @@ struct RenderTargets {
     persist_a_view: wgpu::TextureView,
     _persist_b_texture: wgpu::Texture,
     persist_b_view: wgpu::TextureView,
-    _target_texture: wgpu::Texture,
+    target_texture: wgpu::Texture,
     target_view: wgpu::TextureView,
 }
 
@@ -1328,6 +1328,91 @@ impl GpuRendererScaffold {
         &self.render_targets.target_view
     }
 
+    /// Read the final rendered frame (the LDR, tone-mapped display
+    /// target) back to the CPU and save it as a PNG. Used to write the
+    /// "matrix-code version" of an overlay image next to its source at
+    /// full bloom — a headless, no-window capture (works in benchmark
+    /// mode too, so it never has to take over the screen).
+    pub fn read_output_to_png(&self, path: &std::path::Path) -> Result<(), String> {
+        let texture = &self.render_targets.target_texture;
+        let width = texture.width();
+        let height = texture.height();
+        let bytes_per_pixel = 4u32;
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        // wgpu requires buffer copy rows aligned to 256 bytes.
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+        let buffer_size = (padded_bytes_per_row * height) as u64;
+
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("matrisaver-readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("matrisaver-readback-encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|error| format!("readback poll failed: {error}"))?;
+        receiver
+            .recv()
+            .map_err(|error| format!("readback channel closed: {error}"))?
+            .map_err(|error| format!("buffer map failed: {error}"))?;
+
+        let mapped = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
+        for row in 0..height {
+            let start = (row * padded_bytes_per_row) as usize;
+            let end = start + unpadded_bytes_per_row as usize;
+            pixels.extend_from_slice(&mapped[start..end]);
+        }
+        drop(mapped);
+        buffer.unmap();
+
+        let image = image::RgbaImage::from_raw(width, height, pixels)
+            .ok_or_else(|| "readback pixel buffer size mismatch".to_owned())?;
+        image
+            .save(path)
+            .map_err(|error| format!("PNG save failed: {error}"))?;
+        Ok(())
+    }
+
     fn create_render_targets(
         device: &wgpu::Device,
         width: u32,
@@ -1445,7 +1530,7 @@ impl GpuRendererScaffold {
             persist_a_view,
             _persist_b_texture: persist_b_texture,
             persist_b_view,
-            _target_texture: target_texture,
+            target_texture,
             target_view,
         }
     }

@@ -72,6 +72,13 @@ impl CoreRuntime {
                 // sanitize() with a NaN-then-clamp edge case.
                 self.overlay_dissolve_at =
                     Some(now + self.settings.overlay_persist_seconds.max(0.0));
+                // Full bloom reached. If this overlay came from a custom
+                // folder that opted into sidecars, schedule the
+                // render-to-PNG grab a short settle later.
+                if self.overlay_capture_source.is_some() {
+                    self.overlay_capture_at_frame =
+                        Some(self.frame_index.wrapping_add(OVERLAY_CAPTURE_SETTLE_FRAMES));
+                }
             }
             return;
         }

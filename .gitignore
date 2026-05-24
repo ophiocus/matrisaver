@@ -42,3 +42,8 @@ artifacts/*
 # ignored above). Never commit (© WB). The shipping silhouette must be
 # original Rogers-v-Grimaldi art, not a traced frame.
 /bane/
+
+# Dev-only scene frames grabbed from YouTube via the ytdownloader skill
+# for the overlay colour mega-test (© WB). Never commit; ship art must be
+# original. The source videos live in the ytdownloader project, not here.
+/scenes_dev/

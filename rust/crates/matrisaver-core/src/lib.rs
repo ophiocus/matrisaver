@@ -988,6 +988,15 @@ pub struct CoreRuntime {
     overlay_image_cursor: usize,
     overlay_injected_count: u32,
     overlay_image_name: String,
+    /// Source path of the current overlay image when it came from a
+    /// custom folder that opted into sidecar output (`write_ascii`).
+    /// `Some` arms the render-to-PNG capture; the rendered "matrix-code
+    /// version" is written next to this file at full bloom. `None` for
+    /// variant-pinned / shipped-pack overlays (no sidecars).
+    overlay_capture_source: Option<std::path::PathBuf>,
+    /// Frame index at which to grab the full-bloom render-to-PNG sidecar
+    /// (set a short settle after the painting heads finish). One-shot.
+    overlay_capture_at_frame: Option<u64>,
     overlay_reference_rect: Option<(u32, u32, u32, u32)>,
     overlay_headers: Vec<OverlayHeader>,
     overlay_intro_glyphs: Vec<OverlayIntroGlyph>,
@@ -1032,6 +1041,8 @@ impl CoreRuntime {
             overlay_image_cursor: 0,
             overlay_injected_count: 0,
             overlay_image_name: "none".to_owned(),
+            overlay_capture_source: None,
+            overlay_capture_at_frame: None,
             overlay_reference_rect: None,
             overlay_headers: Vec::new(),
             overlay_intro_glyphs: Vec::new(),
@@ -1083,6 +1094,9 @@ impl CoreRuntime {
             self.request_exit(ExitReason::HostRequest);
         }
         let style_params = self.variant_style_params();
+        // Resolve (and consume) any due full-bloom render-to-PNG sidecar
+        // request before borrowing the GPU scaffold below.
+        let overlay_capture_path = self.take_due_overlay_capture();
         if let Some(gpu) = &mut self.gpu_scaffold {
             let color = self.runtime_config.color;
             let glyph_tint = [
@@ -1112,6 +1126,13 @@ impl CoreRuntime {
                     bloom_intensity: self.settings.vfx_bloom_intensity,
                 },
             );
+            // Full bloom — grab the rendered "matrix-code version" of the
+            // overlay and write it next to the source image. Best-effort.
+            if let Some(path) = &overlay_capture_path {
+                if let Err(error) = gpu.read_output_to_png(path) {
+                    eprintln!("overlay render-to-PNG sidecar failed: {error}");
+                }
+            }
         }
         let draw_ms = draw_started.elapsed().as_secs_f64() * 1000.0;
 

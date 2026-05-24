@@ -9,6 +9,8 @@ impl CoreRuntime {
         self.clear_overlay_locks();
         self.overlay_injected_count = 0;
         self.overlay_image_name = "none".to_owned();
+        self.overlay_capture_source = None;
+        self.overlay_capture_at_frame = None;
         self.overlay_headers.clear();
         self.overlay_intro_glyphs.clear();
         let mut tuning = self.load_overlay_tuning();
@@ -23,6 +25,13 @@ impl CoreRuntime {
         }
         let (image_path, write_ascii) =
             image_paths[self.overlay_image_cursor % image_paths.len()].clone();
+        // Custom-folder images that opted into sidecar output arm the
+        // full-bloom render-to-PNG capture (written next to the source).
+        self.overlay_capture_source = if write_ascii {
+            Some(image_path.clone())
+        } else {
+            None
+        };
         let image_path = image_path.as_path();
         self.overlay_image_cursor = self.overlay_image_cursor.wrapping_add(1);
         let image_name = image_path

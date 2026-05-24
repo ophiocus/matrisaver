@@ -6,6 +6,10 @@ const OVERLAY_HOLD_SECONDS: f32 = 8.0;
 const OVERLAY_INITIAL_TRIGGER_SECONDS: f32 = 8.0;
 const OVERLAY_TRIGGER_MIN_SECONDS: f32 = 15.0;
 const OVERLAY_TRIGGER_RANGE_SECONDS: f32 = 15.0;
+// Frames to wait after the painting heads finish before grabbing the
+// render-to-PNG sidecar, so the bloom/persistence has settled to full
+// bloom. ~0.3s at 60fps.
+const OVERLAY_CAPTURE_SETTLE_FRAMES: u64 = 18;
 
 // Post-reveal hold: how long the painted silhouette dwells after the
 // last painting head finishes its targets, before clear_overlay_locks

@@ -281,6 +281,25 @@ impl CoreRuntime {
         }
     }
 
+    /// If a full-bloom render-to-PNG sidecar grab is due this frame,
+    /// return its target path (`<source-image>.overlay.png`, next to the
+    /// source) and clear the one-shot. `None` when not due, no overlay
+    /// source is armed, or the source directory isn't writable.
+    fn take_due_overlay_capture(&mut self) -> Option<std::path::PathBuf> {
+        let at = self.overlay_capture_at_frame?;
+        if self.frame_index < at {
+            return None;
+        }
+        self.overlay_capture_at_frame = None; // one-shot
+        let source = self.overlay_capture_source.clone()?;
+        let parent = source.parent()?.to_path_buf();
+        if !self.probe_overlay_dir_writable(&parent) {
+            return None;
+        }
+        let file_name = source.file_name()?.to_string_lossy().into_owned();
+        Some(parent.join(format!("{file_name}.overlay.png")))
+    }
+
     /// Walk a sampled luminance grid and produce the same density-ramp
     /// glyph for each cell as the live renderer chooses — text-mode
     /// counterpart of overlay_glyph_index_for_luminance. Cells below
