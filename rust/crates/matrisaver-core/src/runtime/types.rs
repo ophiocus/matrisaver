@@ -6,6 +6,12 @@ const OVERLAY_HOLD_SECONDS: f32 = 8.0;
 const OVERLAY_INITIAL_TRIGGER_SECONDS: f32 = 8.0;
 const OVERLAY_TRIGGER_MIN_SECONDS: f32 = 15.0;
 const OVERLAY_TRIGGER_RANGE_SECONDS: f32 = 15.0;
+// Showcase/demo pacing (MATRISAVER_OVERLAY_FAST) — rip through a whole
+// queue quickly instead of the leisurely default cadence.
+const OVERLAY_FAST_HOLD_SECONDS: f32 = 1.0;
+const OVERLAY_FAST_INITIAL_TRIGGER_SECONDS: f32 = 1.0;
+const OVERLAY_FAST_TRIGGER_MIN_SECONDS: f32 = 1.5;
+const OVERLAY_FAST_TRIGGER_RANGE_SECONDS: f32 = 1.5;
 // Frames to wait after the painting heads finish before grabbing the
 // render-to-PNG sidecar, so the bloom/persistence has settled to full
 // bloom. ~0.3s at 60fps.

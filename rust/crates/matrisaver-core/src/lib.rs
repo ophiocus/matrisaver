@@ -1020,6 +1020,11 @@ pub struct CoreRuntime {
     /// failed, skip future writes silently. Per the v0.2.0 contract:
     /// no error surfacing, no retries.
     overlay_dir_writable: std::collections::HashMap<std::path::PathBuf, bool>,
+    /// Showcase/demo pacing: when `MATRISAVER_OVERLAY_FAST` is set, the
+    /// overlay trigger gap, initial delay, and active-hold collapse to a
+    /// few seconds so every queued image cycles quickly (e.g. to preview
+    /// a whole folder live). Off = the normal 8s / 15-30s cadence.
+    overlay_fast: bool,
 }
 
 impl CoreRuntime {
@@ -1032,6 +1037,9 @@ impl CoreRuntime {
         runtime_config.sanitize();
         let atlas =
             renderer::GlyphAtlas::from_symbols(&runtime_config.symbols, settings.char_size, 4096);
+        let overlay_fast = std::env::var("MATRISAVER_OVERLAY_FAST")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         Self {
             runtime_config,
             settings,
@@ -1048,7 +1056,11 @@ impl CoreRuntime {
             super_volatile_next_change: 2.0,
             super_volatile_pulse_time: None,
             overlay_active_until: None,
-            overlay_next_trigger: OVERLAY_INITIAL_TRIGGER_SECONDS,
+            overlay_next_trigger: if overlay_fast {
+                OVERLAY_FAST_INITIAL_TRIGGER_SECONDS
+            } else {
+                OVERLAY_INITIAL_TRIGGER_SECONDS
+            },
             overlay_dissolve_at: None,
             overlay_locked_cells: Vec::new(),
             overlay_image_cursor: 0,
@@ -1062,6 +1074,29 @@ impl CoreRuntime {
             overlay_intro_mode: OverlayIntroMode::AllAtOnce,
             overlay_tuning: OverlayTuning::default(),
             overlay_dir_writable: std::collections::HashMap::new(),
+            overlay_fast,
+        }
+    }
+
+    /// Active-hold ("dim pre-show") duration — collapsed in fast mode.
+    fn overlay_hold_seconds(&self) -> f32 {
+        if self.overlay_fast {
+            OVERLAY_FAST_HOLD_SECONDS
+        } else {
+            OVERLAY_HOLD_SECONDS
+        }
+    }
+
+    /// (min, range) seconds for the gap before the next overlay —
+    /// collapsed in fast mode so a whole queue cycles quickly.
+    fn overlay_trigger_gap(&self) -> (f32, f32) {
+        if self.overlay_fast {
+            (
+                OVERLAY_FAST_TRIGGER_MIN_SECONDS,
+                OVERLAY_FAST_TRIGGER_RANGE_SECONDS,
+            )
+        } else {
+            (OVERLAY_TRIGGER_MIN_SECONDS, OVERLAY_TRIGGER_RANGE_SECONDS)
         }
     }
 

@@ -44,10 +44,9 @@ impl CoreRuntime {
             self.clear_overlay_locks();
             self.overlay_injected_count = 0;
             self.overlay_image_name = "none".to_owned();
+            let (gap_min, gap_range) = self.overlay_trigger_gap();
             self.overlay_next_trigger =
-                now + OVERLAY_TRIGGER_MIN_SECONDS
-                    + hash01(self.frame_index as u32, 0x0F0F_4422)
-                        * OVERLAY_TRIGGER_RANGE_SECONDS;
+                now + gap_min + hash01(self.frame_index as u32, 0x0F0F_4422) * gap_range;
             return;
         }
 
@@ -88,9 +87,9 @@ impl CoreRuntime {
         }
 
         if !self.inject_overlay_from_image(rows) {
+            let (gap_min, gap_range) = self.overlay_trigger_gap();
             self.overlay_next_trigger =
-                now + OVERLAY_TRIGGER_MIN_SECONDS
-                    + hash01(self.frame_index as u32, 0x0A0A_2929) * OVERLAY_TRIGGER_RANGE_SECONDS;
+                now + gap_min + hash01(self.frame_index as u32, 0x0A0A_2929) * gap_range;
             return;
         }
 
@@ -103,7 +102,7 @@ impl CoreRuntime {
         self.overlay_active_until = if self.runtime_config.overlay_skip_preview {
             None
         } else {
-            Some(now + OVERLAY_HOLD_SECONDS)
+            Some(now + self.overlay_hold_seconds())
         };
     }
 
