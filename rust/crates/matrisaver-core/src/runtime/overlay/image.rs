@@ -51,6 +51,31 @@ impl CoreRuntime {
         )
     }
 
+    /// Sample shape (alpha + luminance) from `shape` and colour (RGB)
+    /// from `color`. With no mask (`has_mask = false`, `shape == color`)
+    /// it's a single sample. With a mask, alpha/luminance come from the
+    /// high-contrast mask (silhouette + glyph density) and the hue comes
+    /// from the colour original — the "chromatic overlay, bane-look ASCII"
+    /// split.
+    fn sample_overlay_shape_color(
+        shape: &image::RgbaImage,
+        color: &image::RgbaImage,
+        grid: CellGrid,
+        cell_col: u32,
+        cell_row: u32,
+        luma_weights: (f32, f32, f32),
+        has_mask: bool,
+    ) -> (f32, f32, [f32; 3]) {
+        let (alpha, luminance, rgb) =
+            Self::sample_overlay_cell(shape, grid, cell_col, cell_row, luma_weights);
+        if !has_mask {
+            return (alpha, luminance, rgb);
+        }
+        let (_, _, color_rgb) =
+            Self::sample_overlay_cell(color, grid, cell_col, cell_row, luma_weights);
+        (alpha, luminance, color_rgb)
+    }
+
     /// Optional contrast-normalization: percentile-based luminance
     /// remapping. Gated behind `tuning.auto_levels_enabled`; off by
     /// default. Defensible for low-contrast / clustered-histogram

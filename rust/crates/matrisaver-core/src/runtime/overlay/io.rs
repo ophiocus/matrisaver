@@ -58,15 +58,21 @@ impl CoreRuntime {
                         .any(|allowed| ext.eq_ignore_ascii_case(allowed))
                 })
             })
-            // Skip our own render-to-PNG sidecars (`<image>.overlay.png`)
-            // so they're never re-ingested as overlay inputs — otherwise
-            // the rendered outputs pollute the queue they were rendered
-            // from and crowd out the real images.
+            // Skip generated/companion files so they're never treated as
+            // standalone overlay inputs:
+            //   `*.overlay.png` — our render-to-PNG sidecars (re-ingesting
+            //      them pollutes the queue with rendered outputs).
+            //   `*.mask.png`    — the bane-treatment shape masks paired
+            //      with each colour original (consumed in inject, not a
+            //      queue entry of their own).
             .filter(|path| {
-                !path
+                let lower = path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|name| name.to_ascii_lowercase().ends_with(".overlay.png"))
+                    .map(|n| n.to_ascii_lowercase());
+                !lower
+                    .as_deref()
+                    .is_some_and(|name| name.ends_with(".overlay.png") || name.ends_with(".mask.png"))
             })
             .collect();
         bucket.sort();

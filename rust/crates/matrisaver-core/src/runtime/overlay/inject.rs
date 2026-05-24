@@ -44,6 +44,19 @@ impl CoreRuntime {
             return false;
         };
         let image = image.to_rgba8();
+        // Optional shape mask sibling (`NAME.mask.png`). When present it
+        // drives the silhouette (alpha) and glyph density (luminance) —
+        // the high-contrast bane-look "ASCII conversion" — while colour
+        // still samples from the original (chromatic overlay preserved).
+        let mask_image = image_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| image_path.with_file_name(format!("{stem}.mask.png")))
+            .filter(|candidate| candidate.is_file())
+            .and_then(|candidate| image::open(candidate).ok())
+            .map(|mask| mask.to_rgba8());
+        let shape_image = mask_image.as_ref().unwrap_or(&image);
+        let has_mask = mask_image.is_some();
         let width = image.width().max(1);
         let height = image.height().max(1);
         let char_size = self.settings.char_size.max(1) as u32;
@@ -87,12 +100,14 @@ impl CoreRuntime {
         let mut sampled_color = vec![[0.0f32; 3]; sample_len];
         for cell_row in 0..fit_rows {
             for cell_col in 0..fit_cols {
-                let (alpha, luminance, color) = Self::sample_overlay_cell(
+                let (alpha, luminance, color) = Self::sample_overlay_shape_color(
+                    shape_image,
                     &image,
                     CellGrid { cols: fit_cols, rows: fit_rows },
                     cell_col,
                     cell_row,
                     tuning.luma_weights,
+                    has_mask,
                 );
                 let index = (cell_row * fit_cols + cell_col) as usize;
                 sampled_alpha[index] = alpha;
@@ -131,12 +146,14 @@ impl CoreRuntime {
         let mut dense_color = vec![[0.0f32; 3]; dense_sample_len];
         for cell_row in 0..fit_rows {
             for dense_col in 0..dense_fit_cols {
-                let (alpha, luminance, color) = Self::sample_overlay_cell(
+                let (alpha, luminance, color) = Self::sample_overlay_shape_color(
+                    shape_image,
                     &image,
                     CellGrid { cols: dense_fit_cols, rows: fit_rows },
                     dense_col,
                     cell_row,
                     tuning.luma_weights,
+                    has_mask,
                 );
                 let index = (cell_row * dense_fit_cols + dense_col) as usize;
                 dense_alpha[index] = alpha;

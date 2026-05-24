@@ -29,7 +29,7 @@ if (-not (Test-Path $exe)) { throw "host not built: $exe (cargo build --release 
 # Source images (skip our own .overlay.png outputs).
 $exts = '.png','.jpg','.jpeg','.bmp','.webp'
 $images = Get-ChildItem $ImageDir -File |
-    Where-Object { $exts -contains $_.Extension.ToLower() -and $_.Name -notlike '*.overlay.png' }
+    Where-Object { $exts -contains $_.Extension.ToLower() -and $_.Name -notlike '*.overlay.png' -and $_.Name -notlike '*.mask.png' }
 if ($images.Count -eq 0) { throw "no source images in $ImageDir" }
 Write-Host "mega-run: $($images.Count) images from $ImageDir (variant=$Variant)"
 

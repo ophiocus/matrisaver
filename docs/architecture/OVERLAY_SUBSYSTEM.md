@@ -286,6 +286,30 @@ sidecar-enabled folder at an image dir, moves the active variant's own
 queue aside so only those images cycle, and runs the host headless long
 enough for every image to reach full bloom, collecting each render.
 
+### Shape mask + colour original pairing
+
+Photographic overlays (dark film frames) sampled directly read as
+near-black: low luminance → floor-brightness glyphs over a mostly-empty
+frame. The fix decouples *shape* from *colour*.
+
+Each colour original `NAME.png` may have a sibling **`NAME.mask.png`** —
+a high-contrast silhouette produced by the bane treatment
+(`scripts/bane_mask.py`: alpha synthesised from luminance, contrast-
+stretched grey RGB). When present, `inject_overlay_from_image` loads it
+and `sample_overlay_shape_color` samples:
+
+- **alpha + luminance from the mask** → the silhouette boundary and the
+  glyph-density (ASCII) mapping. The mask's lifted contrast fills the
+  figure with dense glyphs instead of collapsing to the floor.
+- **RGB from the original** → per-glyph hue (the chromatic overlay).
+
+No mask sibling → single-sample fallback (alpha/luma/colour all from the
+original, i.e. prior behaviour). `bane`'s queue images already *are*
+grayscale masks and have no `.mask.png` sibling, so they're used
+directly (and bane's colour is the fixed crimson tint anyway).
+`collect_overlay_dir` skips `*.mask.png` (alongside `*.overlay.png`) so
+masks are never treated as standalone overlay inputs.
+
 ## How it latches onto the runtime
 
 ### The trigger state machine
