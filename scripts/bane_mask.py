@@ -44,6 +44,26 @@ ALPHA_HIGH = 0.34
 RGB_BLACK = 0.10
 RGB_WHITE = 0.85
 
+# Shadow-recovery (the "invert and process the same way" pass). A second
+# pass on the luminance negative surfaces areas that are a little too dark
+# but still carry image information, so they pick up alpha + glyphs
+# instead of vanishing. Guarded so genuinely-black background (which holds
+# no detail) stays excluded.
+#   INV_NEAR_BLACK : inverted-luma above this == original luma below
+#                    (1 - this) == treated as pure black, recovered = 0.
+#   INV_ALPHA_WEIGHT : how strongly recovered darks join the silhouette.
+#   INV_GREY_WEIGHT  : glyph-density weight for recovered darks (kept < 1
+#                      so they read as mid-tone detail, not as bright as
+#                      the lit figure).
+INV_NEAR_BLACK = 0.88
+INV_ALPHA_WEIGHT = 0.85
+INV_GREY_WEIGHT = 0.6
+
+
+def stretch(value):
+    t = (value - RGB_BLACK) / max(1e-4, (RGB_WHITE - RGB_BLACK))
+    return max(0.0, min(1.0, t))
+
 
 def main():
     if len(sys.argv) != 3:
@@ -63,10 +83,24 @@ def main():
             r, g, b = px[x, y]
             # ITU-R BT.601 luma — matches the engine's default luma_weights.
             luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-            alpha = smoothstep(ALPHA_LOW, ALPHA_HIGH, luma)
-            # Grey RGB carries the internal brightness (code-fire texture).
-            shaped = (luma - RGB_BLACK) / max(1e-4, (RGB_WHITE - RGB_BLACK))
-            shaped = max(0.0, min(1.0, shaped))
+
+            # Normal pass: bright detail.
+            alpha_n = smoothstep(ALPHA_LOW, ALPHA_HIGH, luma)
+            shaped_n = stretch(luma)
+
+            # Inverted ("invert hues") pass on the luminance negative,
+            # processed the same way — recovers dark-but-informative areas.
+            # `keep` rolls off toward genuinely-black pixels so the empty
+            # background isn't dragged in.
+            inv = 1.0 - luma
+            keep = 1.0 - smoothstep(INV_NEAR_BLACK, 1.0, inv)
+            alpha_i = smoothstep(ALPHA_LOW, ALPHA_HIGH, inv) * keep
+            shaped_i = stretch(inv) * keep
+
+            # Combine: union the silhouette, take the stronger glyph
+            # density. Recovered darks ride in at reduced weight.
+            alpha = max(alpha_n, alpha_i * INV_ALPHA_WEIGHT)
+            shaped = max(shaped_n, shaped_i * INV_GREY_WEIGHT)
             grey = int(round(shaped * 255))
             op[x, y] = (grey, grey, grey, int(round(alpha * 255)))
 

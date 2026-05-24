@@ -68,7 +68,9 @@ finally {
     if ($moved) { Move-Item $variantBak $variantDir -Force }
 }
 
-# Collect renders + report coverage.
+# Collect renders into OutDir, then remove them (and the .ascii.txt the
+# engine writes) from the SOURCE dir so the input folder stays clean —
+# otherwise the renders accumulate and get re-ingested/re-masked next run.
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 Get-ChildItem $OutDir -Filter '*.overlay.png' -EA SilentlyContinue | Remove-Item -Force
 $rendered = 0
@@ -82,4 +84,7 @@ foreach ($img in $images) {
         "  [MISS] $($img.Name)"
     }
 }
+# Scrub generated sidecars from the source dir.
+Get-ChildItem $ImageDir -Filter '*.overlay.png' -EA SilentlyContinue | Remove-Item -Force
+Get-ChildItem $ImageDir -Filter '*.ascii.txt' -EA SilentlyContinue | Remove-Item -Force
 Write-Host "mega-run done: $rendered/$($images.Count) rendered -> $OutDir"
