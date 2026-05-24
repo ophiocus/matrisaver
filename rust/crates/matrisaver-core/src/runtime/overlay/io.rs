@@ -58,6 +58,16 @@ impl CoreRuntime {
                         .any(|allowed| ext.eq_ignore_ascii_case(allowed))
                 })
             })
+            // Skip our own render-to-PNG sidecars (`<image>.overlay.png`)
+            // so they're never re-ingested as overlay inputs — otherwise
+            // the rendered outputs pollute the queue they were rendered
+            // from and crowd out the real images.
+            .filter(|path| {
+                !path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().ends_with(".overlay.png"))
+            })
             .collect();
         bucket.sort();
         for path in bucket {
