@@ -7,6 +7,7 @@ Related docs:
 - Module structure: [`MODULE_STRUCTURE.md`](MODULE_STRUCTURE.md)
 - User guide: [`../../assets/overlays/README.md`](../../assets/overlays/README.md)
 - Research: [`../research/OVERLAY_DENSITY_AND_FILTER_HANDOFF.md`](../research/OVERLAY_DENSITY_AND_FILTER_HANDOFF.md)
+- Iconic-scene source list (per-variant queues): [`../research/ICONIC_MATRIX_SCENES.md`](../research/ICONIC_MATRIX_SCENES.md)
 
 ## What this is
 
@@ -28,14 +29,17 @@ All file references are crate-relative under
 |---|---|---|
 | Trigger / state machine / lock management | `runtime/overlay/state.rs` | When to start, when to stop, what to clean up |
 | Image and tuning I/O | `runtime/overlay/io.rs` | Directory resolution, tuning JSON, image enumeration, glyph-atlas lookup |
-| Per-cell sampling and glyph mapping | `runtime/overlay/image.rs` | 2×2 super-sample, opt-in auto-levels remap, density-ramp glyph lookup. V2 dropped the 7-stage filter pipeline. |
-| Image-to-grid orchestration | `runtime/overlay/inject.rs` | Per-injection pipeline: load image → fit to grid → sample → glyph-map → build header & intro target sets → optional ASCII-alongside snapshot |
-| Per-frame instance emission | `runtime/overlay/emit.rs` | Render-phase output: turns header / intro state into `GlyphInstance`s |
-| Runtime fields and lifecycle hook | `lib.rs` (CoreRuntime) | `overlay_*` fields, `set_overlay_reference_rect` / `clear_overlay_reference_rect`, intro-mode default, `overlay_dir_writable` probe cache |
+| Per-cell sampling and glyph mapping | `runtime/overlay/image.rs` | 2×2 super-sample (alpha + luma + **RGB**), opt-in auto-levels remap, **coverage-ramp** glyph lookup (`overlay_glyph_index_by_coverage`) |
+| Image-to-grid orchestration | `runtime/overlay/inject.rs` | Per-injection pipeline: build per-variant queue → load image → fit to grid → sample → glyph-map → build header & intro target sets (carrying sampled colour) → arm render-to-PNG / ASCII sidecars |
+| Per-frame instance emission | `runtime/overlay/emit.rs` | Render-phase output: turns header / intro / frozen state into `GlyphInstance`s with the `+4.0` overlay `style_tag` and per-cell colour |
+| Runtime fields and lifecycle hook | `lib.rs` (CoreRuntime) | `overlay_*` fields (incl. `overlay_capture_source` / `overlay_capture_at_frame`), `set_overlay_reference_rect` / `clear_overlay_reference_rect`, `overlay_dir_writable` probe cache, the render-to-PNG call in `tick_profiled` |
+| GPU framebuffer readback | `gpu.rs` (`GpuRendererScaffold`) | `read_output_to_png` — copies the LDR display target to CPU and saves a PNG (full-bloom overlay sidecar) |
 | Caller (per-frame) | `runtime/lifecycle/frame.rs` | Calls `update_overlay_state` early; calls the two `emit_overlay_*_instances` at the end of `build_stream_instances` |
 | Frozen-cell behavior in rain lifecycle | `runtime/lifecycle/cells.rs` | `cell.frozen` flag is honored by `write_head_row`, `erase_row`, and `update_volatile_cells` so locked overlay cells survive the rain advancing past them |
-| Constants and types | `runtime/types.rs` | `OVERLAY_*` timing/format constants, `OverlayHeader`, `OverlayIntroGlyph`, `OverlayTargetCell`, `OverlayIntroMode`, `OverlayTuning`, `OverlayTuningConfig` |
+| Constants and types | `runtime/types.rs` | `OVERLAY_*` timing/format constants (incl. `OVERLAY_CAPTURE_SETTLE_FRAMES`), `RowCell.overlay_color`, `OverlayHeader`, `OverlayIntroGlyph`/`OverlayTargetCell` (each with `color`), `OverlayIntroMode`, `OverlayTuning`, `OverlayTuningConfig` |
+| Per-variant overlay knobs | `lib.rs` (`config::VariantConfig` / `RuntimeConfig`) | `overlay_tint`, `overlay_subdir`, `overlay_full_pitch`, `overlay_skip_preview`, `overlay_sample_color` (see the V2.2 section) |
 | User-facing settings | `lib.rs` (`config::Settings`) | `overlay_enabled`, `overlay_directories: Vec<OverlaySource>`, `overlay_auto_levels` |
+| Headless batch tool | `scripts/overlay_megarun.ps1` | Renders a folder of images to their `.overlay.png` versions with no screen takeover |
 
 These files are `include!`'d into `lib.rs` rather than declared as sub-
 modules, so all impls extend `CoreRuntime` in the lib's root namespace.
@@ -47,28 +51,38 @@ That's a workspace-wide quirk worth knowing before you go hunting for
 Three axes of input get resolved separately and combined inside
 `inject_overlay_from_image` (`runtime/overlay/inject.rs`).
 
-### 1. Where to look — directory resolution
+### 1. Where to look — the per-variant queue (V2.2)
 
-V2 resolution is driven by `Settings.overlay_directories`, an ordered
-list of `OverlaySource { path, enabled, write_ascii_alongside }`.
-`overlay_image_paths()` walks enabled sources in declaration order,
-collecting any file whose extension matches `OVERLAY_IMAGE_EXTENSIONS`
-(`png, jpg, jpeg, bmp, gif, tga, tiff, webp`). Earlier sources win
-on filename collisions (dedupe via `HashSet<OsString>`).
+`overlay_image_paths()` builds a **per-variant queue**, not a single
+flat list:
 
-When `Settings.overlay_directories` is empty (e.g. fresh install
-before the user adds anything via the dialog), resolution falls back
-to the legacy chain in `resolve_overlay_directory()`:
+1. **Variant iconic queue (leads).** Each variant pins its own
+   subdirectory via `RuntimeConfig.overlay_subdir` (`Some("original")`,
+   `"reloaded"`, `"revolutions"`, `"resurrections"`, `"bane"`). The
+   subdir is resolved under each *overlays root candidate*
+   (`overlay_root_candidates()` = the ProgramData pack root + the
+   legacy-resolved `assets/overlays/` root) and its images collected.
+2. **User folders.** `Settings.overlay_directories` (an ordered list of
+   `OverlaySource { path, enabled, write_ascii_alongside }`) are
+   collected into a separate queue.
+3. **Interleave.** `interleave_overlay_queues()` weaves the two —
+   **variant iconic first**, then folder, then variant, then folder…
+   (`[v0, f0, v1, f1, f2]`) — deduping by filename (variant copy wins).
+   So a film's signature scene always opens the cycle while the user's
+   images are woven in.
+4. **Fallback.** Only if both queues are empty (a variant with no
+   populated subdir and no user folders) does it fall back to the
+   shared shipped pack (`%ProgramData%\matrisaver\overlays\`) then the
+   legacy `resolve_overlay_directory()` chain (`MATRISAVER_OVERLAY_DIR`
+   → exe-ancestor `assets/overlays/` → cwd-ancestor → `CARGO_MANIFEST_DIR`).
 
-1. `MATRISAVER_OVERLAY_DIR` env var, if it points at a real directory.
-2. Walking ancestors of `std::env::current_exe()` looking for
-   `assets/overlays/`.
-3. Walking ancestors of `std::env::current_dir()` looking for
-   `assets/overlays/`.
-4. `option_env!("CARGO_MANIFEST_DIR")` — compile-time dev fallback.
+`collect_overlay_dir` matches `OVERLAY_IMAGE_EXTENSIONS`
+(`png, jpg, jpeg, bmp, gif, tga, tiff, webp`) **and skips any
+`*.overlay.png`** so the render-to-PNG sidecars (below) are never
+re-ingested as inputs.
 
-If none resolve, overlay enumeration returns empty and the trigger
-short-circuits.
+If everything resolves empty, overlay enumeration returns empty and the
+trigger short-circuits.
 
 ### 2. Which images to play
 
@@ -142,11 +156,22 @@ engine itself"**, not filtering imposed on top:
    goes straight to glyph mapping. Defensible for low-contrast /
    clustered-histogram inputs; harmful for already-high-contrast
    silhouettes. Off by default.
-3. **Glyph mapping.** `overlay_glyph_index_for_luminance` maps the
-   shaped value through `OVERLAY_DENSITY_GLYPHS = ".:-=+*<>¦｜/\\"` —
-   13 glyphs from sparse to dense — and looks up the corresponding
-   atlas index. Falls back to `*`, then `+`, then a proportional
-   fallback if the desired glyph isn't in the live atlas.
+3. **Glyph mapping (V2.2).** `overlay_glyph_index_by_coverage` maps the
+   shaped value through the atlas's **coverage ramp** — every glyph in
+   the live atlas ranked by *measured ink coverage*
+   (`GlyphAtlas::coverage_ramp()`, computed once at atlas build by
+   rasterising each glyph with `ab_glyph` and storing `AtlasGlyph.coverage`).
+   Tone picks a position in the ramp with a small per-cell variety jitter,
+   so bright cells fill with dense katakana and dim cells with sparse
+   marks — true tonal mapping in the real Matrix glyph set, self-tuning
+   to whatever `symbol_set` the variant ships.
+
+   *Pre-V2.2 this used a hardcoded `OVERLAY_DENSITY_GLYPHS` punctuation
+   ramp matched by literal character (collapsing to `*`/`+` when a glyph
+   wasn't in the atlas), which flattened tonal range. That path and the
+   old `overlay_glyph_index_for_luminance` / `overlay_glyph_lookup` are
+   gone.* The `OVERLAY_DENSITY_GLYPHS` constant survives only for the
+   text `.ascii.txt` sidecar (`render_overlay_grid_text`).
 
 The result for each grid cell is `(glyph_index, brightness)` where
 `brightness = clamp(brightness_floor + shaped × alpha × brightness_scale, brightness_floor, 1.0)`.
@@ -179,6 +204,87 @@ Failures (read-only directory, write error mid-stream, etc.) are
 silent — the entry in `overlay_dir_writable` flips to `false` and
 all subsequent injections from that directory skip the write. No
 error surfacing per the V2 contract.
+
+## V2.2 — per-variant overlays, colour sampling, render-to-PNG
+
+The 2026-05 work added a layer of *per-variant* overlay behaviour on
+top of the V2 engine. Each `config::VariantConfig` carries optional
+overlay knobs that propagate into `RuntimeConfig`:
+
+| VariantConfig field | Type | Effect | `bane` | films |
+|---|---|---|---|---|
+| `overlay_tint` | `Option<Color>` | Flat colour for overlay-flagged glyphs (`None` = use the field colour, i.e. unchanged) | `Some(crimson)` | `None` |
+| `overlay_subdir` | `Option<&str>` | Variant's pinned iconic-scene queue dir under the overlays root | `Some("bane")` | `Some(<key>)` |
+| `overlay_full_pitch` | `bool` | Paint the silhouette one glyph per image column (`column_span = 1`) instead of filling every half-char rain slot — glyphs read at rain scale instead of a dense half-pitch mat | `true` | `false` |
+| `overlay_skip_preview` | `bool` | Skip the post-injection active-hold ("dim pre-show") and suppress the intro ghost layer — the silhouette is revealed only as the painting heads sweep it in | `true` | `false` |
+| `overlay_sample_color` | `bool` | Colour overlay glyphs by sampling the source image's hue **per cell** instead of the flat `overlay_tint` | `false` | `true` |
+
+`bane` is the canonical worked example: a dim, sparse green rain field
+(its own `color`/`density`) with a crimson code-silhouette painted from
+`assets/overlays/bane/` (a single pinned mask), full-pitch, no dim
+preview, fixed-tint (not sampled). The four film variants instead lead
+their own iconic-scene queues and sample each scene's own colours.
+
+### Two-colour rendering without a second GPU pass
+
+The field rain and the painted overlay can be different colours in the
+same instanced draw. Overlay-emitted glyphs (intro, painting headers,
+frozen locked cells) carry a **`+4.0` offset on their per-instance
+`style_tag`** (`params.w`). The glyph shader recovers the real sub-style
+(`is_overlay = step(3.5, style_tag); base_tag = style_tag - 4*is_overlay`)
+so an overlay glyph can still be volatile/ghost, and selects the overlay
+colour:
+
+```
+overlay_src = mix(overlay_tint, instance_color, vfx_params.y)   // y = sample flag
+base_color  = mix(glyph_tint,  overlay_src,     is_overlay)
+```
+
+- `GlobalUniform.overlay_tint` (vec4) is the flat tint (bane crimson);
+  for non-tinted variants the caller sets it equal to `glyph_tint`.
+- `GlyphInstance.color` (a 4th instance vertex attribute, `@location(4)`)
+  is the **per-cell sampled colour** (films). Carried on
+  `RowCell.overlay_color` / `OverlayTargetCell.color` /
+  `OverlayIntroGlyph.color`, stamped when a head freezes a cell.
+- `vfx_params.y` (set from `GlyphTints.sample_overlay_color`) picks flat
+  tint (0) vs sampled (1).
+- `sample_overlay_cell` now returns averaged RGB alongside alpha/luma.
+
+The white head-wash and green sheen are gated by `(1 - is_overlay)` so a
+bright silhouette keeps its tint instead of washing to white; the HDR
+head boost still applies so the overlay still blooms in-colour.
+
+### Render-to-PNG sidecars (full-bloom capture)
+
+When an overlay image comes from a custom folder that opted into
+sidecars (`write_ascii_alongside`), the runtime also writes the rendered
+"matrix-code version" next to the source:
+
+```
+cat.png  →  cat.png.ascii.txt   (text, pre-existing)
+cat.png  →  cat.png.overlay.png (rendered frame, V2.2)
+```
+
+Flow (entirely in core, so it works windowed **and** in headless
+benchmark mode):
+
+1. At inject, `overlay_capture_source` is armed with the source path if
+   the image's `write_ascii` flag is set.
+2. On entering post-reveal hold (full bloom — painting heads done),
+   `overlay_capture_at_frame = frame_index + OVERLAY_CAPTURE_SETTLE_FRAMES`
+   (≈0.3s, so bloom/persistence settles).
+3. In `tick_profiled`, after the GPU draw, `take_due_overlay_capture()`
+   returns the due target path (`<image>.overlay.png`, writability-probed)
+   and `GpuRendererScaffold::read_output_to_png` copies the LDR display
+   target (`Rgba8Unorm`, `COPY_SRC`) to a `MAP_READ` buffer (256-aligned
+   rows), maps with `poll(Wait)`, un-pads, and saves via the `image` crate.
+
+This is the no-screen-takeover way to preview overlays: a headless
+`--benchmark-frames` run renders to the offscreen target and dumps PNGs
+to disk. `scripts/overlay_megarun.ps1` wraps that — points a
+sidecar-enabled folder at an image dir, moves the active variant's own
+queue aside so only those images cycle, and runs the host headless long
+enough for every image to reach full bloom, collecting each render.
 
 ## How it latches onto the runtime
 
@@ -231,6 +337,13 @@ Time constants live in `runtime/types.rs`:
 
 So gaps are 15-30s, with the very first overlay arriving 8s after
 launch.
+
+**V2.2 — skip-preview variants.** When `RuntimeConfig.overlay_skip_preview`
+is set (e.g. `bane`), the post-injection active-hold window is skipped
+entirely (`overlay_active_until = None`) and `emit_overlay_intro_instances`
+returns early, so there's no dim full-silhouette preview — the image is
+revealed only as the painting heads sweep it in. The lifecycle becomes
+rain → paint-in → freeze/hold → release → rain washes back.
 
 ### Reference rect — where the overlay is allowed to live
 
@@ -345,6 +458,8 @@ overlay_locked_cells: Vec<(usize, usize)>,    // (column_index, row_index) froze
 overlay_image_cursor: usize,                  // round-robin index into overlay_image_paths()
 overlay_injected_count: u32,                  // diagnostic; reflects # of locked cells written so far
 overlay_image_name: String,                   // sanitized filename of current overlay (for trace lines)
+overlay_capture_source: Option<PathBuf>,      // V2.2: armed source path for the full-bloom render-to-PNG sidecar
+overlay_capture_at_frame: Option<u64>,        // V2.2: one-shot frame_index to grab the sidecar at
 overlay_reference_rect: Option<(u32,u32,u32,u32)>,  // primary-monitor sub-rect, or None for full surface
 overlay_headers: Vec<OverlayHeader>,          // active falling headers (one per affected column)
 overlay_intro_glyphs: Vec<OverlayIntroGlyph>, // sub-column flickering intro glyphs
@@ -470,20 +585,28 @@ build_stream_instances (runtime/lifecycle/frame.rs)
   │           │     └── resolve_overlay_tuning_path
   │           │     └── (Settings.overlay_auto_levels overrides tuning.auto_levels_enabled)
   │           ├── overlay_image_paths (runtime/overlay/io.rs)
-  │           │     └── walks Settings.overlay_directories (or legacy fallback)
+  │           │     ├── variant overlay_subdir queue (overlay_root_candidates)
+  │           │     ├── Settings.overlay_directories queue
+  │           │     ├── interleave_overlay_queues (variant iconic first)
+  │           │     └── fallback: ProgramData pack → legacy resolve
+  │           │           (collect_overlay_dir skips *.overlay.png)
   │           ├── image::open / to_rgba8
-  │           ├── sample_overlay_cell (runtime/overlay/image.rs)         [×2 passes]
+  │           ├── sample_overlay_cell (runtime/overlay/image.rs)         [×2 passes, returns RGB]
   │           ├── (optional) auto_levels / remap_level                   [if auto_levels_enabled]
-  │           ├── overlay_glyph_index_for_luminance (runtime/overlay/image.rs)
-  │           ├── (builds overlay_headers + overlay_intro_glyphs)
+  │           ├── coverage_ramp (renderer::GlyphAtlas)
+  │           ├── overlay_glyph_index_by_coverage (runtime/overlay/image.rs)
+  │           ├── (builds overlay_headers + overlay_intro_glyphs, carrying sampled colour)
+  │           ├── (arms overlay_capture_source if write_ascii)
   │           └── (optional) write_overlay_ascii_alongside               [if source opted in]
   │                 ├── probe_overlay_dir_writable                       [cached per session]
   │                 ├── render_overlay_grid_text
   │                 └── std::fs::write(<image>.<ext>.ascii.txt)
   ├── (per-column rain lifecycle — runtime/lifecycle/{column,cells,reset}.rs)
   │     └── frozen cells short-circuit write_head_row / erase_row
-  └── emit instances:
-        ├── (rain instances from emit_original_instances — frozen cells render here)
-        ├── emit_overlay_intro_instances (runtime/overlay/emit.rs)
-        └── emit_overlay_header_instances (runtime/overlay/emit.rs)
+  ├── emit instances:
+  │     ├── (rain instances from emit_original_instances — frozen overlay cells render here w/ +4.0 tag + colour)
+  │     ├── emit_overlay_intro_instances (runtime/overlay/emit.rs)       [skipped if overlay_skip_preview]
+  │     └── emit_overlay_header_instances (runtime/overlay/emit.rs)
+  └── (tick_profiled, after GPU draw)
+        └── take_due_overlay_capture → gpu.read_output_to_png(<image>.overlay.png)  [at full bloom]
 ```
