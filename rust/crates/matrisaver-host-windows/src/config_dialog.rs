@@ -292,9 +292,10 @@ impl ConfigApp {
         // HDR head boost — the multiplier on head glyph emission. The
         // glyph shader emits `(1.0 + head_mix * this)` × base color
         // for heads, so a value of 0 means heads are LDR (same as
-        // trails); 1.5 is the v0.3.2 default (heads up to 2.5× bright);
-        // 3.0 is the v0.3.0 'wild halo' look (heads up to 4.0×, with
-        // ACES toe compression that crushes midtones).
+        // trails); 1.5 was the v0.3.2 default (heads up to 2.5× bright);
+        // 3.0 is the current default (heads up to 4.0×) — paired with the
+        // retuned bloom (threshold 0.5, intensity 1.3) it reads as a
+        // searing halo instead of the v0.3.0 midtone-crushed plate.
         ui.horizontal(|ui| {
             ui.label("HDR head boost:");
             ui.add(
@@ -305,9 +306,10 @@ impl ConfigApp {
         });
         ui.label(
             egui::RichText::new(
-                "0 = no extra brightness on heads (LDR). 1.5 = v0.3.2 default. \
-                 3.0 = v0.3.0 'wild halo' — heads max at 4×, midtones get \
-                 crushed by the ACES tone-map.",
+                "0 = no extra brightness on heads (LDR). 3.0 = current \
+                 default — heads max at 4×, a searing bloom when paired \
+                 with the retuned threshold/intensity. 1.5 = older v0.3.2 \
+                 tame look.",
             )
             .weak()
             .small(),
@@ -329,7 +331,8 @@ impl ConfigApp {
             egui::RichText::new(
                 "Below this HDR luminance, pixels don't bloom. Lower = more \
                  glow across the whole image, fuzzier silhouette. Higher = \
-                 head-only halos, sharper. 0.7 = v0.3.2 default; 1.0 = v0.3.0.",
+                 head-only halos, sharper. 0.5 = current default; 0.7 = \
+                 older v0.3.2; 1.0 = v0.3.0.",
             )
             .weak()
             .small(),
@@ -349,9 +352,9 @@ impl ConfigApp {
         ui.label(
             egui::RichText::new(
                 "Strength of each of the 4 upsample levels (additive, so \
-                 effects compound). 0.85 is the shipped default — gentle \
-                 falloff that reads as phosphor wash. Push toward 2.0 for \
-                 a brighter, more saturated halo.",
+                 effects compound). 1.3 is the current default — a bright, \
+                 saturated halo. Drop toward 0.85 for a gentler phosphor \
+                 wash, or push to 2.0 for maximum glow.",
             )
             .weak()
             .small(),
@@ -386,11 +389,13 @@ impl ConfigApp {
 
         if ui.button("Reset visual effects to defaults").clicked() {
             // Reset just the VFX block; leave overlays, variant, etc.
-            // alone. Defaults match Settings::default() field-for-field.
-            self.working.vfx_head_hdr_scale = 1.5;
-            self.working.vfx_bloom_threshold = 0.7;
-            self.working.vfx_bloom_intensity = 0.85;
-            self.working.overlay_persist_seconds = 15.0;
+            // alone. Pull straight from Settings::default() so these can
+            // never drift out of sync with the canonical defaults again.
+            let defaults = Settings::default();
+            self.working.vfx_head_hdr_scale = defaults.vfx_head_hdr_scale;
+            self.working.vfx_bloom_threshold = defaults.vfx_bloom_threshold;
+            self.working.vfx_bloom_intensity = defaults.vfx_bloom_intensity;
+            self.working.overlay_persist_seconds = defaults.overlay_persist_seconds;
             self.set_status(
                 "Visual effects reset — click Apply to save",
                 egui::Color32::LIGHT_BLUE,

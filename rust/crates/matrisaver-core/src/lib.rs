@@ -480,9 +480,16 @@ pub mod config {
         /// crank the bloom halo around heads; too big crushes the
         /// midtones via the ACES tone-map shoulder.
         ///
-        /// Default: 1.5. v0.3.0 shipped at 3.0 (heads at 4.0×) and
-        /// produced the "no midtones / looks thresholded" artefact
-        /// in overlay silhouettes. v0.3.2 dialled back to 1.5.
+        /// Default: 3.0. History: v0.3.0 shipped at 3.0 (heads at
+        /// 4.0×) and produced a "no midtones / looks thresholded"
+        /// artefact, so v0.3.2 dialled back to 1.5. Restored to 3.0
+        /// once the bloom prefilter was retuned (threshold 0.7→0.5,
+        /// intensity 0.85→1.3): the lower threshold + higher intensity
+        /// spread the hot-head energy into a glow halo rather than
+        /// letting the ACES shoulder crush it to a flat threshold, so
+        /// 3.0 now reads as a searing bloom instead of a clipped plate.
+        /// The three knobs are tuned as a set — moving head HDR back up
+        /// without the bloom retune reintroduces the v0.3.0 artefact.
         #[serde(default = "default_vfx_head_hdr_scale")]
         pub vfx_head_hdr_scale: f32,
         /// Bloom prefilter threshold (HDR linear). HDR pixels above
@@ -490,7 +497,9 @@ pub mod config {
         /// soft knee at half the threshold so the cutoff fades.
         /// Lower = more glow, fuzzier; higher = sharper, head-only.
         ///
-        /// Default: 0.7. v0.3.0 shipped at 1.0 (head-only).
+        /// Default: 0.5. v0.3.0 shipped at 1.0 (head-only); 0.3.2 used
+        /// 0.7. Lowered to 0.5 as part of the punchy-bloom set so more
+        /// of the hot-head energy blooms (pairs with head HDR 3.0).
         #[serde(default = "default_vfx_bloom_threshold")]
         pub vfx_bloom_threshold: f32,
         /// Per-upsample additive intensity in the mip-chain bloom.
@@ -498,7 +507,9 @@ pub mod config {
         /// additively onto the larger mip below. Bigger = stronger
         /// glow at every level (compounds across 4 upsamples).
         ///
-        /// Default: 0.85.
+        /// Default: 1.3. Raised from 0.85 with the punchy-bloom set so
+        /// each upsample adds more glow (pairs with head HDR 3.0 and
+        /// bloom threshold 0.5).
         #[serde(default = "default_vfx_bloom_intensity")]
         pub vfx_bloom_intensity: f32,
         /// Post-reveal dwell time, in seconds. After the overlay
@@ -552,13 +563,13 @@ pub mod config {
     // can adopt them, which lets pre-v0.3.3 settings.json files load without
     // explicit values for these fields.
     fn default_vfx_head_hdr_scale() -> f32 {
-        1.5
+        3.0
     }
     fn default_vfx_bloom_threshold() -> f32 {
-        0.7
+        0.5
     }
     fn default_vfx_bloom_intensity() -> f32 {
-        0.85
+        1.3
     }
     fn default_overlay_persist_seconds() -> f32 {
         15.0
