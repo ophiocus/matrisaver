@@ -17,6 +17,11 @@
 //      can actually see the finished image. Previously cleared
 //      locks the same frame the last head completed, so the
 //      fully-revealed silhouette was visible for ~one frame.
+//      When the dwell expires, `dissolve_overlay_into_rain` spawns
+//      a fresh rain head at the topmost silhouette row in every
+//      affected column, so the silhouette vanishes INTO rain
+//      top-down rather than thawing in place and waiting for the
+//      column's ambient head to eventually sweep past.
 //   5. Idle: waiting for overlay_next_trigger to fire, then inject.
 impl CoreRuntime {
     fn update_overlay_state(&mut self, now: f32, rows: u32, frame_dt: f32) {
@@ -33,15 +38,16 @@ impl CoreRuntime {
         }
 
         // Phase 4: post-reveal hold. Silhouette is fully painted and
-        // dwelling. When the dwell window expires, clear locks (which
-        // unfreezes the painted cells, returning them to normal rain)
-        // and schedule the next overlay.
+        // dwelling. When the dwell window expires, dissolve INTO rain:
+        // spawn a fresh head at the topmost silhouette row of every
+        // affected column so the silhouette vanishes top-down as rain
+        // washes over it, then schedule the next overlay.
         if let Some(dissolve_at) = self.overlay_dissolve_at {
             if now < dissolve_at {
                 return;
             }
             self.overlay_dissolve_at = None;
-            self.clear_overlay_locks();
+            self.dissolve_overlay_into_rain();
             self.overlay_injected_count = 0;
             self.overlay_image_name = "none".to_owned();
             let (gap_min, gap_range) = self.overlay_trigger_gap();
@@ -114,6 +120,52 @@ impl CoreRuntime {
                 }
             }
         }
+    }
+
+    /// Dissolve the silhouette into rain at the end of the post-reveal
+    /// hold (Phase 4 → Idle). For every column that holds locked
+    /// silhouette cells, yank that column's rain head up to the topmost
+    /// silhouette row and let the column's normal head_speed carry it
+    /// downward — the lifecycle tick then writes fresh head + trail
+    /// glyphs over the (just-thawed) silhouette cells, top to bottom,
+    /// so the figure literally vanishes into rain rather than just
+    /// thawing in place and sitting visible until an ambient head
+    /// happens to wander past.
+    ///
+    /// `last_head_row = top_row - 1` so the next tick writes the head
+    /// glyph AT `top_row` instead of skipping it (the lifecycle's
+    /// "did we cross a new row?" check compares the current row to
+    /// `last_head_row`). For `top_row == 0` this evaluates to `-1`,
+    /// the standard "no previous head" sentinel — handled by the i32
+    /// type. Bumps `head_reset_count` so the metric reflects the spawn.
+    ///
+    /// `clear_overlay_locks()` runs LAST so the cells are unfrozen
+    /// AFTER the heads are repositioned — otherwise a column whose
+    /// existing head was sitting on a silhouette row would write a
+    /// rain glyph there on the same frame and the dissolve would
+    /// start one row too low.
+    fn dissolve_overlay_into_rain(&mut self) {
+        let char_size = self.settings.char_size.max(1) as f32;
+        let mut topmost_by_column: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::with_capacity(self.overlay_locked_cells.len());
+        for &(column_index, row_index) in &self.overlay_locked_cells {
+            topmost_by_column
+                .entry(column_index)
+                .and_modify(|current| {
+                    if row_index < *current {
+                        *current = row_index;
+                    }
+                })
+                .or_insert(row_index);
+        }
+        for (column_index, top_row) in topmost_by_column {
+            if let Some(column) = self.rain_columns.get_mut(column_index) {
+                column.head_y = top_row as f32 * char_size;
+                column.last_head_row = top_row as i32 - 1;
+                column.head_reset_count = column.head_reset_count.saturating_add(1);
+            }
+        }
+        self.clear_overlay_locks();
     }
 
     fn advance_overlay_headers(&mut self, frame_dt: f32) -> bool {
