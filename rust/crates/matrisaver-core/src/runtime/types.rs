@@ -17,6 +17,24 @@ const OVERLAY_FAST_TRIGGER_RANGE_SECONDS: f32 = 1.5;
 // bloom. ~0.3s at 60fps.
 const OVERLAY_CAPTURE_SETTLE_FRAMES: u64 = 18;
 
+// Three-stage overlay timing, expressed as multipliers on the variant's
+// max rain head_speed (speed_range.1):
+//
+//   Stage 1 — fast INTRO: overlay painting headers sweep in to freeze
+//     the silhouette. Multiplied at inject time onto speed_range.1 so
+//     the silhouette assembles visibly snappier than rain.
+//   Stage 2 — STAY: post-reveal dwell (`overlay_persist_seconds`,
+//     handled by `overlay_dissolve_at`). Speed doesn't apply — locked.
+//   Stage 3 — slow OUTRO: dissolve heads spawned at the silhouette top
+//     by `dissolve_overlay_into_rain`. The lifecycle's `head_y`
+//     advancement consults each column's `outro_speed_override` (set
+//     at dissolve time to `head_speed * OUTRO_MULTIPLIER`, auto-cleared
+//     once `head_y` crosses `outro_release_y`), so the wash drags
+//     slower than rain and the silhouette ablates gracefully instead
+//     of snapping out.
+const OVERLAY_INTRO_SPEED_MULTIPLIER: f32 = 3.0;
+const OVERLAY_OUTRO_SPEED_MULTIPLIER: f32 = 0.4;
+
 // Post-reveal hold: how long the painted silhouette dwells after the
 // last painting head finishes its targets, before clear_overlay_locks
 // fires and normal rain resumes. Without it, v0.3.x cleared locks the
@@ -262,6 +280,16 @@ struct RainColumn {
     glyph_swap_count: u64,
     row_cells: Vec<RowCell>,
     ghosts: Vec<GhostGlyph>,
+    /// Stage 3 (slow OUTRO) override: when `Some`, the lifecycle
+    /// advances `head_y` at this speed instead of `head_speed`. Set
+    /// by `dissolve_overlay_into_rain` when a head is yanked to the
+    /// silhouette top so the dissolve sweep moves slower than rain.
+    /// Auto-cleared once `head_y` crosses `outro_release_y`.
+    outro_speed_override: Option<f32>,
+    /// `y` pixel threshold (inclusive) at which `outro_speed_override`
+    /// auto-clears. Set by the dissolve to (silhouette-bottom + buffer)
+    /// so the slow wash covers the whole figure before rain resumes.
+    outro_release_y: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -297,6 +325,21 @@ impl Default for OriginalLifecycleMutators {
 struct CellGrid {
     cols: u32,
     rows: u32,
+}
+
+/// Per-injection sampling spec for overlay cell sampling. Bundles the
+/// invariant args that hold steady across every cell of one inject
+/// call — the grid dimensions, the RGB→Y weights, and the cover-cropped
+/// window of the source image (in source-pixel coords) — so the
+/// per-cell sampler call site stays at a sane arg count.
+#[derive(Debug, Clone, Copy)]
+struct OverlaySamplePlan {
+    grid: CellGrid,
+    luma_weights: (f32, f32, f32),
+    /// `(x0, y0, x1, y1)` window of the source image that maps onto the
+    /// grid. For COVER, the shorter image axis fills the grid; the
+    /// longer is cropped symmetrically (pad/2 each side).
+    visible_rect: (f32, f32, f32, f32),
 }
 
 #[derive(Debug, Clone, Copy)]

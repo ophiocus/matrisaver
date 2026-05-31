@@ -1,26 +1,41 @@
 // Overlay image sampling, luminance preprocessing, and glyph index mapping.
 impl CoreRuntime {
-    /// Returns `(alpha, luminance, [r, g, b])` for a grid cell, 4x
+    /// Returns `(alpha, luminance, [r, g, b])` for one grid cell, 4x
     /// supersampled. The RGB is the cell's average colour (0..1), used by
     /// sample-colour variants so the painted glyphs carry the source
     /// scene's hues; alpha/luminance drive the silhouette and density.
+    ///
+    /// `plan.visible_rect = (x0, y0, x1, y1)` defines the window of the
+    /// source image (in source-pixel coords) that maps onto the grid.
+    /// The grid stretches that window across `(grid.cols × grid.rows)`
+    /// cells — each cell samples
+    /// `(x0 + (col+0.5)/cols * (x1-x0), y0 + ...)`. For COVER scaling
+    /// (`fit_cols = ascii_cols`, `fit_rows = rows`),
+    /// `inject_overlay_from_image` computes this window from the image
+    /// aspect vs the grid aspect so the image's shorter dimension fills
+    /// the grid and the excess on the longer axis is cropped
+    /// symmetrically (`pad / 2` on each side). For "sample the whole
+    /// image" callers, pass `(0.0, 0.0, image.width() as f32, image.height() as f32)`.
     fn sample_overlay_cell(
         image: &image::RgbaImage,
-        grid: CellGrid,
+        plan: &OverlaySamplePlan,
         cell_col: u32,
         cell_row: u32,
-        luma_weights: (f32, f32, f32),
     ) -> (f32, f32, [f32; 3]) {
         let width = image.width();
         let height = image.height();
+        let (rx0, ry0, rx1, ry1) = plan.visible_rect;
+        let rw = (rx1 - rx0).max(1.0);
+        let rh = (ry1 - ry0).max(1.0);
         let offsets = [(-0.25f32, -0.25f32), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)];
         let mut alpha_sum = 0.0;
         let mut luma_sum = 0.0;
         let mut rgb_sum = [0.0f32; 3];
         let mut weight_sum = 0.0;
+        let (lw_r, lw_g, lw_b) = plan.luma_weights;
         for (ox, oy) in offsets {
-            let sx = ((cell_col as f32 + 0.5 + ox) / grid.cols as f32) * width as f32;
-            let sy = ((cell_row as f32 + 0.5 + oy) / grid.rows as f32) * height as f32;
+            let sx = rx0 + ((cell_col as f32 + 0.5 + ox) / plan.grid.cols as f32) * rw;
+            let sy = ry0 + ((cell_row as f32 + 0.5 + oy) / plan.grid.rows as f32) * rh;
             let px = sx.floor().clamp(0.0, (width - 1) as f32) as u32;
             let py = sy.floor().clamp(0.0, (height - 1) as f32) as u32;
             let pixel = image.get_pixel(px, py);
@@ -28,8 +43,7 @@ impl CoreRuntime {
             let g = pixel[1] as f32 / 255.0;
             let b = pixel[2] as f32 / 255.0;
             let alpha = pixel[3] as f32 / 255.0;
-            let luminance = (r * luma_weights.0 + g * luma_weights.1 + b * luma_weights.2)
-                .clamp(0.0, 1.0);
+            let luminance = (r * lw_r + g * lw_g + b * lw_b).clamp(0.0, 1.0);
             alpha_sum += alpha;
             luma_sum += luminance;
             rgb_sum[0] += r;
@@ -60,19 +74,16 @@ impl CoreRuntime {
     fn sample_overlay_shape_color(
         shape: &image::RgbaImage,
         color: &image::RgbaImage,
-        grid: CellGrid,
+        plan: &OverlaySamplePlan,
         cell_col: u32,
         cell_row: u32,
-        luma_weights: (f32, f32, f32),
         has_mask: bool,
     ) -> (f32, f32, [f32; 3]) {
-        let (alpha, luminance, rgb) =
-            Self::sample_overlay_cell(shape, grid, cell_col, cell_row, luma_weights);
+        let (alpha, luminance, rgb) = Self::sample_overlay_cell(shape, plan, cell_col, cell_row);
         if !has_mask {
             return (alpha, luminance, rgb);
         }
-        let (_, _, color_rgb) =
-            Self::sample_overlay_cell(color, grid, cell_col, cell_row, luma_weights);
+        let (_, _, color_rgb) = Self::sample_overlay_cell(color, plan, cell_col, cell_row);
         (alpha, luminance, color_rgb)
     }
 

@@ -10,7 +10,21 @@ impl CoreRuntime {
             (ctx.volatile_chance + mutators.volatile_chance_bias).clamp(0.0, 1.0);
         let effective_ghost_chance =
             (ctx.ghost_chance + mutators.ghost_chance_bias).clamp(0.0, 1.0);
-        column.head_y += column.head_speed * ctx.frame_dt;
+        // Three-stage overlay timing: the column normally advances at
+        // `head_speed`, but `dissolve_overlay_into_rain` (Stage 3 / slow
+        // OUTRO) sets `outro_speed_override` to drag a dissolve head
+        // slowly through the silhouette region. The override clears
+        // itself the moment `head_y` crosses `outro_release_y` so a
+        // single check covers both "use slow" and "expire slow" without
+        // a separate per-frame timer.
+        let effective_head_speed = match column.outro_speed_override {
+            Some(slow) if column.head_y < column.outro_release_y => slow,
+            _ => {
+                column.outro_speed_override = None;
+                column.head_speed
+            }
+        };
+        column.head_y += effective_head_speed * ctx.frame_dt;
         column.eraser_y += column.eraser_speed * ctx.frame_dt;
 
         if column.eraser_y <= column.head_y {

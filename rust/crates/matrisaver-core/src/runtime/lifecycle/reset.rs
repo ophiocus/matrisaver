@@ -26,6 +26,15 @@ impl CoreRuntime {
         column.last_head_row = -1;
         column.head_row_step = 0;
         column.head_glyph_index = column.glyph_cursor.wrapping_add((seed * 1024.0) as u32);
+        // Defensive: the dissolve outro auto-clears its override once
+        // head_y crosses outro_release_y, but if a head somehow survives
+        // a reset with the override still set (e.g. release_y was
+        // off-screen because the silhouette extended past `rows`), the
+        // next head spawn would inherit the slowdown and the next rain
+        // cycle would look wrong. Reset here so a fresh head spawn is
+        // unambiguously full-speed rain.
+        column.outro_speed_override = None;
+        column.outro_release_y = 0.0;
     }
 
     fn reset_eraser(
@@ -196,6 +205,8 @@ impl CoreRuntime {
                 glyph_swap_count: 0,
                 row_cells,
                 ghosts: Vec::new(),
+                outro_speed_override: None,
+                outro_release_y: 0.0,
             });
         }
 
@@ -286,6 +297,8 @@ impl CoreRuntime {
                 glyph_swap_count: 0,
                 row_cells,
                 ghosts: Vec::new(),
+                outro_speed_override: None,
+                outro_release_y: 0.0,
             });
         }
     }

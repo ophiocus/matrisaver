@@ -1669,6 +1669,8 @@ mod tests {
                 overlay_color: [0.0; 3],
             }],
             ghosts: Vec::new(),
+            outro_speed_override: None,
+            outro_release_y: 0.0,
         };
 
         let wrote = CoreRuntime::write_head_row(&mut column, 0, 1.0, 1.0, 99);

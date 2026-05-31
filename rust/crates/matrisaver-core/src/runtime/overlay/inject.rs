@@ -80,33 +80,60 @@ impl CoreRuntime {
         let row_start = (ref_y / char_size) as i32;
         let row_end = ((ref_y + ref_h) as f32 / char_size as f32).ceil() as i32;
         let rows = (row_end - row_start).max(1) as u32;
+        // V2.3 COVER scaling — the painted grid stays the full target
+        // (ascii_cols × rows) anchored at the target's (col_start,
+        // row_start) which is char (0, 0) of the main screen, and the
+        // image is scaled proportionally so its SHORTER dimension fills
+        // the grid. The overflow on the longer axis is cropped
+        // symmetrically (pad/2 on each side), so the visible part of
+        // the image is centered. `visible_rect` (in source-pixel coords)
+        // is passed to the samplers — both the painting/header grid
+        // and the finer dense/intro grid use the same window, so the
+        // .ascii.txt sidecar (which reads from the same sampled buffers)
+        // stays in lock-step with the on-screen result. Before V2.3 we
+        // used aspect-FIT (contain) with a horizontal centering offset
+        // and a vertical push-to-bottom — letterbox bars on one axis
+        // and the silhouette wasn't anchored to (0, 0).
         let image_aspect = width as f32 / height as f32;
         let target_aspect = ascii_cols as f32 / rows as f32;
-        let (fit_cols, fit_rows) = if image_aspect > target_aspect {
-            let fit_cols = ascii_cols;
-            let fit_rows = ((fit_cols as f32 / image_aspect).round() as u32).max(1);
-            (fit_cols, fit_rows)
+        let fit_cols = ascii_cols;
+        let fit_rows = rows;
+        let visible_rect: (f32, f32, f32, f32) = if image_aspect > target_aspect {
+            // Image is wider than the grid → scale so the image HEIGHT
+            // fills the grid height; crop the sides symmetrically.
+            let visible_w = height as f32 * target_aspect;
+            let pad = (width as f32 - visible_w) * 0.5;
+            (pad, 0.0, width as f32 - pad, height as f32)
         } else {
-            let fit_rows = rows;
-            let fit_cols = ((fit_rows as f32 * image_aspect).round() as u32).max(1);
-            (fit_cols, fit_rows)
+            // Image is taller than the grid → scale so the image WIDTH
+            // fills the grid width; crop top/bottom symmetrically.
+            let visible_h = width as f32 / target_aspect;
+            let pad = (height as f32 - visible_h) * 0.5;
+            (0.0, pad, width as f32, height as f32 - pad)
         };
-        let col_offset = ((ascii_cols.saturating_sub(fit_cols)) / 2) as i32;
-        let row_offset = (rows as i32 - fit_rows as i32).max(0);
+        // Cover fills the grid by construction, so paints start at the
+        // target's top-left (col_start, row_start) — char (0, 0) of the
+        // main screen — with no further centering offset on either axis.
+        let col_offset = 0i32;
+        let row_offset = 0i32;
 
         let sample_len = (fit_cols * fit_rows) as usize;
         let mut sampled_alpha = vec![0.0f32; sample_len];
         let mut sampled_luma = vec![0.0f32; sample_len];
         let mut sampled_color = vec![[0.0f32; 3]; sample_len];
+        let header_plan = OverlaySamplePlan {
+            grid: CellGrid { cols: fit_cols, rows: fit_rows },
+            luma_weights: tuning.luma_weights,
+            visible_rect,
+        };
         for cell_row in 0..fit_rows {
             for cell_col in 0..fit_cols {
                 let (alpha, luminance, color) = Self::sample_overlay_shape_color(
                     shape_image,
                     &image,
-                    CellGrid { cols: fit_cols, rows: fit_rows },
+                    &header_plan,
                     cell_col,
                     cell_row,
-                    tuning.luma_weights,
                     has_mask,
                 );
                 let index = (cell_row * fit_cols + cell_col) as usize;
@@ -144,15 +171,19 @@ impl CoreRuntime {
         let mut dense_alpha = vec![0.0f32; dense_sample_len];
         let mut dense_luma = vec![0.0f32; dense_sample_len];
         let mut dense_color = vec![[0.0f32; 3]; dense_sample_len];
+        let dense_plan = OverlaySamplePlan {
+            grid: CellGrid { cols: dense_fit_cols, rows: fit_rows },
+            luma_weights: tuning.luma_weights,
+            visible_rect,
+        };
         for cell_row in 0..fit_rows {
             for dense_col in 0..dense_fit_cols {
                 let (alpha, luminance, color) = Self::sample_overlay_shape_color(
                     shape_image,
                     &image,
-                    CellGrid { cols: dense_fit_cols, rows: fit_rows },
+                    &dense_plan,
                     dense_col,
                     cell_row,
-                    tuning.luma_weights,
                     has_mask,
                 );
                 let index = (cell_row * dense_fit_cols + dense_col) as usize;
@@ -308,7 +339,12 @@ impl CoreRuntime {
         }
 
         let top_y = row_start as f32 * char_size as f32;
-        let header_speed = (self.runtime_config.speed_range.1 as f32 * 3.0).max(1.0);
+        // Stage 1 (fast INTRO) speed — uses the named multiplier so the
+        // intro/outro values live as a tuned pair next to each other in
+        // types.rs instead of as a bare `3.0` literal scattered here.
+        let header_speed = (self.runtime_config.speed_range.1 as f32
+            * OVERLAY_INTRO_SPEED_MULTIPLIER)
+            .max(1.0);
         let mut columns: Vec<(usize, ColumnRowTargets)> =
             per_column_targets.into_iter().collect();
         columns.sort_by_key(|(column_index, _)| *column_index);
