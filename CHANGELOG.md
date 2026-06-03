@@ -11,6 +11,38 @@ For commit-level history use `git log`.
 
 (no entries yet)
 
+## [0.3.5] — 2026-06-03
+
+Closes the user-provided-folder loop so dropped images integrate
+without an external pre-bake step.
+
+### Added
+
+- **In-runtime silhouette synthesis** (`synthesise_silhouette` in
+  `runtime/overlay/image.rs`). Port of `scripts/bane_mask.py`'s
+  forward + shadow-recovery passes, applied per subsample inside
+  `sample_overlay_cell` before the 4-supersample average. Gated by a
+  new `OverlaySamplePlan.synthesize_silhouette` flag set to
+  `!has_mask` in `inject.rs` — when a `<name>.mask.png` sibling
+  exists it's still used directly (existing path, unchanged); when
+  it doesn't, the runtime derives the high-contrast silhouette from
+  the colour image's luma. Constants (`SIL_ALPHA_LOW=0.14`,
+  `SIL_ALPHA_HIGH=0.34`, `SIL_RGB_BLACK=0.10`, `SIL_RGB_WHITE=0.85`,
+  `SIL_INV_NEAR_BLACK=0.88`, `SIL_INV_ALPHA_WEIGHT=0.85`,
+  `SIL_INV_GREY_WEIGHT=0.6`) lifted verbatim from `bane_mask.py` so
+  the visual contract matches. The python pass's post-stage
+  `GaussianBlur(radius=1.2)` is not ported — the 4-subsample cell
+  average produces equivalent edge smoothing.
+
+### Changed
+
+- **User-folder workflow:** dropping a new image into a watched
+  overlay folder now integrates on the next inject cycle without any
+  external script invocation. `scripts/bane_mask.py` remains as the
+  reference implementation and is still available for pre-baking
+  masks (slightly cheaper at inject — saves ~10 math ops × 4
+  subsamples per cell once), but it's no longer required.
+
 ## [0.3.4] — 2026-06-03
 
 Overlay subsystem overhaul. Drove the lifecycle, scaling, and chromatic
