@@ -7,10 +7,14 @@ The format is loosely based on
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 For commit-level history use `git log`.
 
-## [Unreleased] — targeting v0.3.4
+## [Unreleased]
+
+(no entries yet)
+
+## [0.3.4] — 2026-06-03
 
 Overlay subsystem overhaul. Drove the lifecycle, scaling, and chromatic
-policy to match the user's three-stage intent — *incoming rain → stay
+policy to match the three-stage intent — *incoming rain → stay
 → vanish in rain* — and laid in the diagnostic infrastructure that
 surfaced the regressions along the way.
 
