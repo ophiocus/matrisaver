@@ -171,10 +171,16 @@ impl CoreRuntime {
         let mut sampled_alpha = vec![0.0f32; sample_len];
         let mut sampled_luma = vec![0.0f32; sample_len];
         let mut sampled_color = vec![[0.0f32; 3]; sample_len];
+        // When no `<name>.mask.png` sibling exists, the runtime
+        // synthesises the silhouette in-place (port of bane_mask.py)
+        // so user-dropped images integrate without an external script.
+        // A hand-crafted mask file stands on its own.
+        let synthesize_silhouette = !has_mask;
         let header_plan = OverlaySamplePlan {
             grid: CellGrid { cols: fit_cols, rows: fit_rows },
             luma_weights: tuning.luma_weights,
             visible_rect,
+            synthesize_silhouette,
         };
         for cell_row in 0..fit_rows {
             for cell_col in 0..fit_cols {
@@ -225,6 +231,7 @@ impl CoreRuntime {
             grid: CellGrid { cols: dense_fit_cols, rows: fit_rows },
             luma_weights: tuning.luma_weights,
             visible_rect,
+            synthesize_silhouette,
         };
         for cell_row in 0..fit_rows {
             for dense_col in 0..dense_fit_cols {

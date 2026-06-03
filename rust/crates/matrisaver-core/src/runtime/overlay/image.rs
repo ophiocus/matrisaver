@@ -1,4 +1,64 @@
 // Overlay image sampling, luminance preprocessing, and glyph index mapping.
+
+// In-runtime silhouette synthesis constants — direct port of
+// scripts/bane_mask.py so the visual contract matches when a user drops
+// a raw image into a watched folder and no `<name>.mask.png` sibling
+// exists. The script becomes a reference implementation; the runtime
+// produces the same shape without invoking it.
+//
+//   ALPHA_LOW/HIGH        — smoothstep band for the forward pass.
+//                           Below ALPHA_LOW the luma reads as background
+//                           (transparent); above ALPHA_HIGH it reads as
+//                           lit figure (opaque); the band between is
+//                           the soft silhouette edge.
+//   RGB_BLACK/WHITE       — contrast stretch so glyph density spreads
+//                           across the tonal range instead of clumping
+//                           at the bright end.
+//   INV_NEAR_BLACK        — shadow-recovery guard. The inverted-luma
+//                           pass rolls off as inv crosses this, so the
+//                           genuinely-black background doesn't get
+//                           pulled back into the silhouette.
+//   INV_ALPHA_WEIGHT/_GREY — how strongly recovered darks join the
+//                           silhouette / contribute to glyph density.
+//                           Kept < 1 so they read as mid-tone detail.
+const SIL_ALPHA_LOW: f32 = 0.14;
+const SIL_ALPHA_HIGH: f32 = 0.34;
+const SIL_RGB_BLACK: f32 = 0.10;
+const SIL_RGB_WHITE: f32 = 0.85;
+const SIL_INV_NEAR_BLACK: f32 = 0.88;
+const SIL_INV_ALPHA_WEIGHT: f32 = 0.85;
+const SIL_INV_GREY_WEIGHT: f32 = 0.6;
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if edge1 <= edge0 {
+        return if x < edge0 { 0.0 } else { 1.0 };
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn stretch_tone(value: f32) -> f32 {
+    let span = (SIL_RGB_WHITE - SIL_RGB_BLACK).max(1e-4);
+    ((value - SIL_RGB_BLACK) / span).clamp(0.0, 1.0)
+}
+
+/// Forward + shadow-recovery silhouette synthesis. Returns
+/// `(synthesised_alpha, synthesised_luma)` for one subsample given its
+/// raw luma. The raw alpha is ignored on purpose — bane_mask.py was
+/// authored for opaque source frames, and the synthesis is what *gives*
+/// them an alpha. Matches that contract.
+fn synthesise_silhouette(luma: f32) -> (f32, f32) {
+    let alpha_n = smoothstep(SIL_ALPHA_LOW, SIL_ALPHA_HIGH, luma);
+    let shaped_n = stretch_tone(luma);
+    let inv = 1.0 - luma;
+    let keep = 1.0 - smoothstep(SIL_INV_NEAR_BLACK, 1.0, inv);
+    let alpha_i = smoothstep(SIL_ALPHA_LOW, SIL_ALPHA_HIGH, inv) * keep;
+    let shaped_i = stretch_tone(inv) * keep;
+    let syn_alpha = alpha_n.max(alpha_i * SIL_INV_ALPHA_WEIGHT);
+    let syn_luma = shaped_n.max(shaped_i * SIL_INV_GREY_WEIGHT);
+    (syn_alpha, syn_luma)
+}
+
 impl CoreRuntime {
     /// Returns `(alpha, luminance, [r, g, b])` for one grid cell, 4x
     /// supersampled. The RGB is the cell's average colour (0..1), used by
@@ -42,8 +102,20 @@ impl CoreRuntime {
             let r = pixel[0] as f32 / 255.0;
             let g = pixel[1] as f32 / 255.0;
             let b = pixel[2] as f32 / 255.0;
-            let alpha = pixel[3] as f32 / 255.0;
-            let luminance = (r * lw_r + g * lw_g + b * lw_b).clamp(0.0, 1.0);
+            let raw_alpha = pixel[3] as f32 / 255.0;
+            let raw_luma = (r * lw_r + g * lw_g + b * lw_b).clamp(0.0, 1.0);
+            // Per-subsample silhouette synthesis when the source has no
+            // pre-baked mask sibling. Runs BEFORE the 4-subsample
+            // average so the alpha/luma curves are applied at pixel
+            // grain (matches the per-pixel pass in bane_mask.py); the
+            // averaging then naturally smooths the silhouette edge,
+            // which is why bane_mask's post-pass GaussianBlur isn't
+            // ported — the cell average already does the equivalent.
+            let (alpha, luminance) = if plan.synthesize_silhouette {
+                synthesise_silhouette(raw_luma)
+            } else {
+                (raw_alpha, raw_luma)
+            };
             alpha_sum += alpha;
             luma_sum += luminance;
             rgb_sum[0] += r;

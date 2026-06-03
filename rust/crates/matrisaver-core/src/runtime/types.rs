@@ -353,9 +353,10 @@ struct CellGrid {
 
 /// Per-injection sampling spec for overlay cell sampling. Bundles the
 /// invariant args that hold steady across every cell of one inject
-/// call — the grid dimensions, the RGB→Y weights, and the cover-cropped
-/// window of the source image (in source-pixel coords) — so the
-/// per-cell sampler call site stays at a sane arg count.
+/// call — the grid dimensions, the RGB→Y weights, the cover-cropped
+/// window of the source image (in source-pixel coords), and whether
+/// the per-pixel silhouette synthesis filter runs on each subsample —
+/// so the per-cell sampler call site stays at a sane arg count.
 #[derive(Debug, Clone, Copy)]
 struct OverlaySamplePlan {
     grid: CellGrid,
@@ -364,6 +365,14 @@ struct OverlaySamplePlan {
     /// grid. For COVER, the shorter image axis fills the grid; the
     /// longer is cropped symmetrically (pad/2 each side).
     visible_rect: (f32, f32, f32, f32),
+    /// When true, each subsample's (alpha, luma) is run through
+    /// `synthesise_silhouette` (the in-runtime port of bane_mask.py)
+    /// before being averaged into the cell value. RGB is unaffected.
+    /// Set true when the source has no companion `<name>.mask.png` so
+    /// user-dropped images derive their own silhouette without
+    /// requiring an external pre-bake step. False when a hand-crafted
+    /// mask is being read directly (its values stand on their own).
+    synthesize_silhouette: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
