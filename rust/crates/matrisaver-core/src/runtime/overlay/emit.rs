@@ -7,9 +7,13 @@ impl CoreRuntime {
         surface_height: f32,
         char_size: u32,
     ) {
-        // `overlay_skip_preview` variants (e.g. bane) suppress the dim
-        // intro ghost layer entirely — the silhouette is revealed only by
-        // the painting heads, never previewed.
+        // Per-variant intro-ghost layer toggle. When the variant sets
+        // `overlay_skip_preview = true` (bane), this dim full-silhouette
+        // ghost layer is never rendered — the figure is revealed only
+        // by the painting heads sweeping down. The flag's name still
+        // says "preview" for legacy reasons; the active-hold pre-show
+        // phase it used to ALSO gate was removed in v0.3.x when the
+        // three-stage spec was enforced (see overlay/state.rs).
         if self.runtime_config.overlay_skip_preview {
             return;
         }
@@ -51,9 +55,6 @@ impl CoreRuntime {
         surface_height: f32,
         char_size: u32,
     ) {
-        if self.overlay_active_until.is_some() {
-            return;
-        }
         let column_pitch = Self::column_pitch(char_size);
         for header in &self.overlay_headers {
             if header.next_target_index >= header.targets.len() {

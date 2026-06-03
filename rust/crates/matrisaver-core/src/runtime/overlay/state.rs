@@ -1,33 +1,41 @@
 // Overlay state machine: trigger, lock management, and header advancement.
 //
-// Five phases, in order each frame:
+// Three lifecycle stages, in order, plus disabled + idle bookends:
 //
-//   1. Disabled: settings toggle off → tear down all overlay state,
+//   0. Disabled: settings toggle off → tear down all overlay state,
 //      reset next-trigger clock.
-//   2. Active-hold (overlay_active_until set): post-injection window
-//      where intro ghost glyphs are visible but painting heads have
-//      not yet started moving. Just returns each frame.
-//   3. Painting (overlay_headers non-empty): painting heads sweep
-//      down their columns; advance_overlay_headers paints frozen
-//      silhouette cells as they reach each target row.
-//   4. Post-reveal hold (overlay_dissolve_at set): NEW in v0.3.2.
-//      After all painting heads complete, the silhouette dwells
-//      with cells still frozen for `settings.overlay_persist_seconds`
-//      (admin-panel slider since v0.3.3, default 15s) so the user
-//      can actually see the finished image. Previously cleared
-//      locks the same frame the last head completed, so the
-//      fully-revealed silhouette was visible for ~one frame.
-//      When the dwell expires, `dissolve_overlay_into_rain` spawns
-//      a fresh rain head at the topmost silhouette row in every
-//      affected column, so the silhouette vanishes INTO rain
-//      top-down rather than thawing in place and waiting for the
-//      column's ambient head to eventually sweep past.
-//   5. Idle: waiting for overlay_next_trigger to fire, then inject.
+//   1. INTRO — incoming rain: `overlay_headers` non-empty. Painting
+//      heads sweep down at OVERLAY_INTRO_SPEED_MULTIPLIER × max rain
+//      head_speed; `advance_overlay_headers` freezes silhouette cells
+//      as each head reaches its target rows. Variants that opted into
+//      the dim ghost intro layer (`!overlay_skip_preview`) also
+//      render that layer concurrently; it's retired cell-by-cell as
+//      the painting heads catch up.
+//   2. STAY — post-reveal hold: `overlay_dissolve_at` set. After the
+//      last painting head finishes, the silhouette dwells with cells
+//      frozen for `settings.overlay_persist_seconds` (admin-panel
+//      slider, default 15s) so the user actually sees the finished
+//      image. Pre-v0.3.2 cleared locks the same frame and the fully
+//      revealed silhouette was visible for ~one frame only.
+//   3. OUTRO — vanish in rain: when the dwell expires,
+//      `dissolve_overlay_into_rain` yanks a fresh head to the top of
+//      the silhouette in every affected column and installs a slow
+//      `outro_speed_override` (× OVERLAY_OUTRO_SPEED_MULTIPLIER) so
+//      the head drags through the silhouette region at well-below
+//      rain speed. The column's lifecycle auto-clears the override
+//      once `head_y` crosses `outro_release_y` (silhouette bottom +
+//      buffer), returning to ambient rain.
+//   ∞. Idle: waiting for `overlay_next_trigger` to fire, then inject.
+//
+// v0.3.x had a fourth stage between idle and INTRO — an "active-hold"
+// dim pre-show window (`overlay_active_until`) that ran for up to 8s
+// before the painting heads moved. It was removed in v0.3.x so the
+// lifecycle matches the three-stage spec the user asked for; the
+// pre-show was always purgatory wedged between trigger and intro.
 impl CoreRuntime {
     fn update_overlay_state(&mut self, now: f32, rows: u32, frame_dt: f32) {
         if !self.settings.overlay_enabled {
             self.clear_overlay_locks();
-            self.overlay_active_until = None;
             self.overlay_dissolve_at = None;
             self.overlay_next_trigger = now + OVERLAY_INITIAL_TRIGGER_SECONDS;
             self.overlay_injected_count = 0;
@@ -47,20 +55,22 @@ impl CoreRuntime {
                 return;
             }
             self.overlay_dissolve_at = None;
+            overlay_log(&format!(
+                "[OVERLAY] STAY done @{:.2}s -> OUTRO (locked_cells={})",
+                now,
+                self.overlay_locked_cells.len()
+            ));
             self.dissolve_overlay_into_rain();
             self.overlay_injected_count = 0;
             self.overlay_image_name = "none".to_owned();
             let (gap_min, gap_range) = self.overlay_trigger_gap();
             self.overlay_next_trigger =
                 now + gap_min + hash01(self.frame_index as u32, 0x0F0F_4422) * gap_range;
+            overlay_log(&format!(
+                "[OVERLAY] OUTRO scheduled, next inject in {:.1}s",
+                self.overlay_next_trigger - now
+            ));
             return;
-        }
-
-        if let Some(active_until) = self.overlay_active_until {
-            if now < active_until {
-                return;
-            }
-            self.overlay_active_until = None;
         }
 
         if !self.overlay_headers.is_empty() {
@@ -75,8 +85,14 @@ impl CoreRuntime {
                 // default 15s). `.max(0.0)` guards against pathological
                 // negatives if a hand-edited settings.json sneaks past
                 // sanitize() with a NaN-then-clamp edge case.
-                self.overlay_dissolve_at =
-                    Some(now + self.settings.overlay_persist_seconds.max(0.0));
+                let dwell = self.settings.overlay_persist_seconds.max(0.0);
+                self.overlay_dissolve_at = Some(now + dwell);
+                overlay_log(&format!(
+                    "[OVERLAY] INTRO done @{:.2}s -> STAY (dwell={:.1}s, locked_cells={})",
+                    now,
+                    dwell,
+                    self.overlay_locked_cells.len()
+                ));
                 // Full bloom reached. If this overlay came from a custom
                 // folder that opted into sidecars, schedule the
                 // render-to-PNG grab a short settle later.
@@ -96,20 +112,24 @@ impl CoreRuntime {
             let (gap_min, gap_range) = self.overlay_trigger_gap();
             self.overlay_next_trigger =
                 now + gap_min + hash01(self.frame_index as u32, 0x0A0A_2929) * gap_range;
+            overlay_log(&format!(
+                "[OVERLAY] inject FAILED @{:.2}s, retry in {:.1}s",
+                now,
+                self.overlay_next_trigger - now
+            ));
             return;
         }
 
-        // The active-hold window is the "dim pre-show": it displays the
-        // intro ghost layer as a dim full-silhouette preview before the
-        // painting heads move. Variants with `overlay_skip_preview` skip
-        // it entirely (active_until = None), so the very next frame enters
-        // the painting phase and the silhouette is revealed only as the
-        // heads paint it in.
-        self.overlay_active_until = if self.runtime_config.overlay_skip_preview {
-            None
-        } else {
-            Some(now + self.overlay_hold_seconds())
-        };
+        // Three-stage enforcement: painting heads begin moving on the
+        // next frame. No active-hold pre-show — see the file-level
+        // comment for the v0.3.x cleanup.
+        overlay_log(&format!(
+            "[OVERLAY] INJECT @{:.2}s -> INTRO (image={:?}, headers={}, intro_glyphs={})",
+            now,
+            self.overlay_image_name,
+            self.overlay_headers.len(),
+            self.overlay_intro_glyphs.len()
+        ));
     }
 
     fn clear_overlay_locks(&mut self) {
@@ -171,6 +191,11 @@ impl CoreRuntime {
                 })
                 .or_insert((row_index, row_index));
         }
+        let total_columns = span_by_column.len();
+        let mut min_top = usize::MAX;
+        let mut max_bottom = 0usize;
+        let mut min_slow = f32::INFINITY;
+        let mut max_slow = 0f32;
         for (column_index, (top_row, bottom_row)) in span_by_column {
             if let Some(column) = self.rain_columns.get_mut(column_index) {
                 column.head_y = top_row as f32 * char_size;
@@ -179,7 +204,18 @@ impl CoreRuntime {
                 let slow_speed = column.head_speed * OVERLAY_OUTRO_SPEED_MULTIPLIER;
                 column.outro_speed_override = Some(slow_speed);
                 column.outro_release_y = (bottom_row as f32 + 2.0) * char_size;
+                min_top = min_top.min(top_row);
+                max_bottom = max_bottom.max(bottom_row);
+                min_slow = min_slow.min(slow_speed);
+                max_slow = max_slow.max(slow_speed);
             }
+        }
+        if total_columns > 0 {
+            overlay_log(&format!(
+                "[OVERLAY] DISSOLVE columns={} row_span={}..{} slow_speed={:.2}..{:.2} (multiplier={:.2})",
+                total_columns, min_top, max_bottom, min_slow, max_slow,
+                OVERLAY_OUTRO_SPEED_MULTIPLIER
+            ));
         }
         self.clear_overlay_locks();
     }

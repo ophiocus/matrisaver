@@ -80,42 +80,92 @@ impl CoreRuntime {
         let row_start = (ref_y / char_size) as i32;
         let row_end = ((ref_y + ref_h) as f32 / char_size as f32).ceil() as i32;
         let rows = (row_end - row_start).max(1) as u32;
-        // V2.3 COVER scaling — the painted grid stays the full target
+        // V2.4 COVER scaling against the SILHOUETTE BOUNDING BOX, not
+        // the full image. The painted grid stays the full target
         // (ascii_cols × rows) anchored at the target's (col_start,
-        // row_start) which is char (0, 0) of the main screen, and the
-        // image is scaled proportionally so its SHORTER dimension fills
-        // the grid. The overflow on the longer axis is cropped
-        // symmetrically (pad/2 on each side), so the visible part of
-        // the image is centered. `visible_rect` (in source-pixel coords)
-        // is passed to the samplers — both the painting/header grid
-        // and the finer dense/intro grid use the same window, so the
-        // .ascii.txt sidecar (which reads from the same sampled buffers)
-        // stays in lock-step with the on-screen result. Before V2.3 we
-        // used aspect-FIT (contain) with a horizontal centering offset
-        // and a vertical push-to-bottom — letterbox bars on one axis
-        // and the silhouette wasn't anchored to (0, 0).
-        let image_aspect = width as f32 / height as f32;
+        // row_start) — char (0, 0) of the main screen. The silhouette's
+        // tight bbox (auto-detected by `silhouette_bbox` via alpha for
+        // transparency-carrying PNGs, via luma for greyscale masks) is
+        // then cover-scaled to fill the grid: the shorter bbox
+        // dimension fills, the longer overflows and is cropped
+        // symmetrically (pad/2 on each side, centered).
+        //
+        // V2.3 used the FULL image dims for the aspect, so PNGs with
+        // transparent / black padding around the figure stretched the
+        // PADDING to the grid, not the figure. Some images "near
+        // covered" the screen (their figure happened to be tightly
+        // cropped) and others "failed to stretch" (loose padding shrank
+        // the figure). Sizing against the silhouette bbox makes EVERY
+        // image paint at consistent screen-cover, and the colour image
+        // samples the same source-pixel region (visible_rect is in
+        // source coords, applied to both shape and colour) so chromatic
+        // info stays aligned with the painted shape.
+        //
+        // `visible_rect` is passed to the samplers — both the
+        // painting/header grid and the finer dense/intro grid use the
+        // same window, so the `.ascii.txt` sidecar (read from the same
+        // sampled buffers) stays in lock-step with the on-screen result.
         let target_aspect = ascii_cols as f32 / rows as f32;
         let fit_cols = ascii_cols;
         let fit_rows = rows;
-        let visible_rect: (f32, f32, f32, f32) = if image_aspect > target_aspect {
-            // Image is wider than the grid → scale so the image HEIGHT
-            // fills the grid height; crop the sides symmetrically.
-            let visible_w = height as f32 * target_aspect;
-            let pad = (width as f32 - visible_w) * 0.5;
-            (pad, 0.0, width as f32 - pad, height as f32)
+        let (bbox_x, bbox_y, bbox_w, bbox_h) =
+            Self::silhouette_bbox(shape_image, tuning.alpha_cutoff, tuning.luma_weights)
+                .unwrap_or((0, 0, width, height));
+        let bbox_aspect = bbox_w as f32 / bbox_h as f32;
+        let bbox_x_f = bbox_x as f32;
+        let bbox_y_f = bbox_y as f32;
+        let bbox_w_f = bbox_w as f32;
+        let bbox_h_f = bbox_h as f32;
+        let visible_rect: (f32, f32, f32, f32) = if bbox_aspect > target_aspect {
+            // bbox is wider than the grid → scale so bbox HEIGHT fills
+            // the grid height; crop bbox sides symmetrically.
+            let visible_w = bbox_h_f * target_aspect;
+            let pad = (bbox_w_f - visible_w) * 0.5;
+            (
+                bbox_x_f + pad,
+                bbox_y_f,
+                bbox_x_f + bbox_w_f - pad,
+                bbox_y_f + bbox_h_f,
+            )
         } else {
-            // Image is taller than the grid → scale so the image WIDTH
-            // fills the grid width; crop top/bottom symmetrically.
-            let visible_h = width as f32 / target_aspect;
-            let pad = (height as f32 - visible_h) * 0.5;
-            (0.0, pad, width as f32, height as f32 - pad)
+            // bbox is taller than the grid → scale so bbox WIDTH fills
+            // the grid width; crop top/bottom symmetrically.
+            let visible_h = bbox_w_f / target_aspect;
+            let pad = (bbox_h_f - visible_h) * 0.5;
+            (
+                bbox_x_f,
+                bbox_y_f + pad,
+                bbox_x_f + bbox_w_f,
+                bbox_y_f + bbox_h_f - pad,
+            )
         };
         // Cover fills the grid by construction, so paints start at the
         // target's top-left (col_start, row_start) — char (0, 0) of the
         // main screen — with no further centering offset on either axis.
         let col_offset = 0i32;
         let row_offset = 0i32;
+        overlay_log(&format!(
+            "[OVERLAY] inject load name={} src={}x{} bbox=({},{},{},{}) target=({},{},{},{}) grid={}x{} visible=({:.0},{:.0},{:.0},{:.0}) mask={} full_pitch={}",
+            image_name,
+            width,
+            height,
+            bbox_x,
+            bbox_y,
+            bbox_w,
+            bbox_h,
+            ref_x,
+            ref_y,
+            ref_w,
+            ref_h,
+            ascii_cols,
+            rows,
+            visible_rect.0,
+            visible_rect.1,
+            visible_rect.2,
+            visible_rect.3,
+            has_mask,
+            self.runtime_config.overlay_full_pitch,
+        ));
 
         let sample_len = (fit_cols * fit_rows) as usize;
         let mut sampled_alpha = vec![0.0f32; sample_len];

@@ -72,7 +72,7 @@ impl CoreRuntime {
             head_writes,
             chain_resets,
             glyph_swaps,
-            self.overlay_active_until.is_some() || !self.overlay_headers.is_empty(),
+            !self.overlay_headers.is_empty(),
             frozen_cells,
             self.overlay_injected_count,
             overlay_intro_glyphs,

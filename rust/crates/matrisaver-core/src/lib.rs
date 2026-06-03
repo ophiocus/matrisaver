@@ -997,7 +997,6 @@ pub struct CoreRuntime {
     rain_layout: (u32, u32, u16),
     super_volatile_next_change: f32,
     super_volatile_pulse_time: Option<f32>,
-    overlay_active_until: Option<f32>,
     overlay_next_trigger: f32,
     /// Post-reveal hold timestamp. Set when the last overlay painting
     /// head completes its targets; the silhouette stays locked (frozen
@@ -1066,7 +1065,6 @@ impl CoreRuntime {
             rain_layout: (0, 0, char_size),
             super_volatile_next_change: 2.0,
             super_volatile_pulse_time: None,
-            overlay_active_until: None,
             overlay_next_trigger: if overlay_fast {
                 OVERLAY_FAST_INITIAL_TRIGGER_SECONDS
             } else {
@@ -1086,15 +1084,6 @@ impl CoreRuntime {
             overlay_tuning: OverlayTuning::default(),
             overlay_dir_writable: std::collections::HashMap::new(),
             overlay_fast,
-        }
-    }
-
-    /// Active-hold ("dim pre-show") duration — collapsed in fast mode.
-    fn overlay_hold_seconds(&self) -> f32 {
-        if self.overlay_fast {
-            OVERLAY_FAST_HOLD_SECONDS
-        } else {
-            OVERLAY_HOLD_SECONDS
         }
     }
 

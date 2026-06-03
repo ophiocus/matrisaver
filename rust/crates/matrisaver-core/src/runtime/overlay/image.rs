@@ -109,6 +109,90 @@ impl CoreRuntime {
         }
     }
 
+    /// Tight bounding box of the silhouette content inside `image`, as
+    /// (x, y, width, height) in source-pixel coords. Returns `None` if
+    /// no pixel passes the criterion (e.g. fully-transparent or
+    /// fully-black input).
+    ///
+    /// Auto-detects which criterion to use:
+    ///
+    ///   * If ANY pixel in `image` has alpha < 255, the image has real
+    ///     transparency — use `alpha >= alpha_cutoff` (the same cutoff
+    ///     the inject loop uses to decide which cells become silhouette).
+    ///     Chromatic PNGs with transparent borders fall into this path.
+    ///   * If every pixel is opaque (alpha == 255), `image` is a
+    ///     bitmap-derived mask (greyscale-on-RGBA, or a film capture
+    ///     with no alpha channel) — fall back to a luminance cutoff
+    ///     (~5%) so black background gets excluded but the silhouette
+    ///     content drives the bbox. The bane masks live here.
+    ///
+    /// Why bother: without this, the cover-scaling math in
+    /// `inject_overlay_from_image` stretches the FULL IMAGE (including
+    /// padding / borders) to the screen, so PNGs with generous
+    /// transparent margins paint a silhouette much smaller than the
+    /// screen. Sizing the cover against the silhouette's own bbox makes
+    /// EVERY image paint at consistent screen-cover.
+    fn silhouette_bbox(
+        image: &image::RgbaImage,
+        alpha_cutoff: f32,
+        luma_weights: (f32, f32, f32),
+    ) -> Option<(u32, u32, u32, u32)> {
+        let width = image.width();
+        let height = image.height();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let mut has_transparency = false;
+        'scan: for y in 0..height {
+            for x in 0..width {
+                if image.get_pixel(x, y)[3] < 255 {
+                    has_transparency = true;
+                    break 'scan;
+                }
+            }
+        }
+        let alpha_cutoff_u8 = (alpha_cutoff * 255.0).clamp(0.0, 255.0) as u8;
+        let luma_cutoff_u8 = 13u8; // ~5% of 255 — kills near-black bg.
+        let (lw_r, lw_g, lw_b) = luma_weights;
+        let mut min_x = width;
+        let mut min_y = height;
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        let mut found = false;
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = image.get_pixel(x, y);
+                let passes = if has_transparency {
+                    pixel[3] >= alpha_cutoff_u8
+                } else {
+                    let luma = pixel[0] as f32 * lw_r
+                        + pixel[1] as f32 * lw_g
+                        + pixel[2] as f32 * lw_b;
+                    luma >= luma_cutoff_u8 as f32
+                };
+                if passes {
+                    if x < min_x {
+                        min_x = x;
+                    }
+                    if y < min_y {
+                        min_y = y;
+                    }
+                    if x > max_x {
+                        max_x = x;
+                    }
+                    if y > max_y {
+                        max_y = y;
+                    }
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            return None;
+        }
+        Some((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+    }
+
     fn percentile(sorted_values: &[f32], p: f32) -> f32 {
         if sorted_values.is_empty() {
             return 0.0;

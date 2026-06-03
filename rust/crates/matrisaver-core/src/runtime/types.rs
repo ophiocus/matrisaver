@@ -2,13 +2,14 @@
 
 const OVERLAY_IMAGE_EXTENSIONS: [&str; 8] =
     ["png", "jpg", "jpeg", "bmp", "gif", "tga", "tiff", "webp"];
-const OVERLAY_HOLD_SECONDS: f32 = 8.0;
 const OVERLAY_INITIAL_TRIGGER_SECONDS: f32 = 8.0;
 const OVERLAY_TRIGGER_MIN_SECONDS: f32 = 15.0;
 const OVERLAY_TRIGGER_RANGE_SECONDS: f32 = 15.0;
 // Showcase/demo pacing (MATRISAVER_OVERLAY_FAST) — rip through a whole
-// queue quickly instead of the leisurely default cadence.
-const OVERLAY_FAST_HOLD_SECONDS: f32 = 1.0;
+// queue quickly instead of the leisurely default cadence. The active-
+// hold "fast hold" constant was removed when the pre-show phase was
+// dropped in v0.3.x (three-stage enforcement); the trigger pacing
+// is what remains.
 const OVERLAY_FAST_INITIAL_TRIGGER_SECONDS: f32 = 1.0;
 const OVERLAY_FAST_TRIGGER_MIN_SECONDS: f32 = 1.5;
 const OVERLAY_FAST_TRIGGER_RANGE_SECONDS: f32 = 1.5;
@@ -16,6 +17,29 @@ const OVERLAY_FAST_TRIGGER_RANGE_SECONDS: f32 = 1.5;
 // render-to-PNG sidecar, so the bloom/persistence has settled to full
 // bloom. ~0.3s at 60fps.
 const OVERLAY_CAPTURE_SETTLE_FRAMES: u64 = 18;
+
+/// Append a diagnostic overlay trace line to the path in
+/// `MATRISAVER_OVERLAY_LOG`. Silent no-op when the env var is unset,
+/// so the production binary pays zero cost (no file is opened).
+/// Stderr-based logging (`eprintln!`) doesn't survive once the
+/// screensaver window comes up — the `.scr` is GUI-subsystem and its
+/// console handles detach — so traces go straight to a file the caller
+/// owns. Open-write-close per call: tracing fires on lifecycle
+/// transitions (a few per second at most), so the syscall overhead is
+/// irrelevant and we avoid any global state / locking ceremony.
+fn overlay_log(msg: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("MATRISAVER_OVERLAY_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{msg}");
+    }
+}
 
 // Three-stage overlay timing, expressed as multipliers on the variant's
 // max rain head_speed (speed_range.1):
