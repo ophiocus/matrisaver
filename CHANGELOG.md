@@ -11,6 +11,46 @@ For commit-level history use `git log`.
 
 (no entries yet)
 
+## [0.3.6] — 2026-06-03
+
+First cut of the shake-to-menu feature request
+([`docs/features/shake-menu.md`](docs/features/shake-menu.md)).
+
+### Added
+
+- **Shake-to-menu**: cursor movement during full screensaver playback
+  no longer instantly exits. A rolling 600 ms cursor-path buffer plus
+  a shake detector (path ≥ 220 px AND ≥ 3 direction reversals) tells a
+  deliberate shake from ambient jitter. On shake, the screensaver
+  spawns `./exe /c 0` (the same entrypoint Personalization's
+  "Settings…" uses) and destroys its own window, so the user lands in
+  the settings dialog. Keyboard and mouse-click still exit
+  immediately.
+- **Hidden cursor during playback**: `ShowCursor(FALSE)` at window
+  create, paired with `ShowCursor(TRUE)` in `WM_NCDESTROY`. Preview
+  mode leaves the cursor alone.
+- **Tabbed config dialog** (Options / About / Share) with a
+  right-aligned Exit button that quits the whole process.
+- **About pane**: name, version (`CARGO_PKG_VERSION`), first-release
+  month (hardcoded `2026-05`; tags can be rewritten, a const can't),
+  author, repo link, MIT licence, and a credits block (Rezmason
+  glyphs, WB Matrix Code NFT CC-personal-use, Rogers-v-Grimaldi
+  original silhouette art).
+- **Share pane**: a QR code of the repo URL (via the `qrcode` crate,
+  rasterised into an egui texture once and cached) plus the URL as
+  monospace-selectable text.
+- New dependency: `qrcode = "0.14"` — pure Rust, MIT/Apache, no image
+  encoder pulled in.
+
+### Deferred (tracked in `docs/features/shake-menu.md`)
+
+- Menu drawn as a translucent overlay over the animating rain (needs
+  an egui composition layer inside the existing wgpu render pass).
+- Options-tab button spawning a fresh `/c 0` (currently no-op
+  redundant with just being in the dialog).
+- Escape / re-shake to return to screensaver — not applicable while
+  the menu lives in a separate dialog process.
+
 ## [0.3.5] — 2026-06-03
 
 Closes the user-provided-folder loop so dropped images integrate
