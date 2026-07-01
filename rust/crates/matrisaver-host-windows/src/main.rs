@@ -493,9 +493,9 @@ mod windows_host {
         PostQuitMessage, RegisterClassW, SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage,
         CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, IDC_ARROW, MSG, SM_CXSCREEN,
         SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-        SW_SHOW, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN,
-        WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_SIZE, WM_TIMER, WNDCLASSW,
-        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+        ShowCursor, SW_SHOW, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
+        WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_SIZE, WM_TIMER,
+        WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
     };
 
     struct WindowPresenter {
@@ -863,21 +863,39 @@ mod windows_host {
         Preview,
     }
 
-    // Standard .scr convention: tolerate a few pixels of cursor jitter
-    // and ignore input for a brief grace period after launch. Without
-    // these, optical-mouse jitter or a residual key release from
-    // launching the screensaver dismisses it before any frames render.
-    const JITTER_THRESHOLD_PX: i32 = 4;
+    // Standard .scr convention: ignore input for a brief grace period
+    // after launch. Without it, a residual key release from launching the
+    // screensaver dismisses it before any frames render.
     const INPUT_GRACE_MS: u128 = 500;
+
+    // Shake-to-menu gesture (v0.3.6+). Any incidental mouse movement is
+    // *ignored*, so the cursor being knocked or an optical-mouse twitch
+    // no longer kills the screensaver. Only a deliberate shake — total
+    // path over `SHAKE_PATH_MIN_PX` with at least `SHAKE_REVERSALS_MIN`
+    // direction reversals inside the last `SHAKE_WINDOW_MS` — counts as
+    // "user wants the menu." When it fires we spawn the config dialog
+    // (matrisaver's egui shell) and destroy the screensaver window so
+    // the user lands in the settings without an extra keyboard step.
+    // Keyboard and mouse-click still exit immediately, unchanged.
+    const SHAKE_WINDOW_MS: u128 = 600;
+    const SHAKE_PATH_MIN_PX: i32 = 220;
+    const SHAKE_REVERSALS_MIN: u32 = 3;
 
     struct HostState {
         runtime: CoreRuntime,
         mode: HostWindowMode,
         presenter: Option<WindowPresenter>,
-        last_cursor: Option<(i32, i32)>,
         launch_instant: std::time::Instant,
         lifecycle_frames_left: Option<u32>,
         lifecycle_trace: Option<BufWriter<std::fs::File>>,
+        /// Rolling cursor path used by the shake detector. Each entry is
+        /// `(when, x, y)`; anything older than `SHAKE_WINDOW_MS` is
+        /// drained on every WM_MOUSEMOVE.
+        cursor_path: std::collections::VecDeque<(std::time::Instant, i32, i32)>,
+        /// True once we've called `ShowCursor(FALSE)` for this window so
+        /// we know to increment the visibility counter back on destroy.
+        /// Only set in Screensaver mode; Preview keeps the cursor.
+        cursor_hidden: bool,
     }
 
     pub fn run(
@@ -999,10 +1017,11 @@ mod windows_host {
                 runtime,
                 mode: window_mode,
                 presenter: None,
-                last_cursor: None,
                 launch_instant: std::time::Instant::now(),
                 lifecycle_frames_left: lifecycle_frames,
                 lifecycle_trace: trace_writer.take(),
+                cursor_path: std::collections::VecDeque::with_capacity(64),
+                cursor_hidden: false,
             });
             let state_ptr = Box::into_raw(state);
             let hwnd = CreateWindowExW(
@@ -1037,6 +1056,13 @@ mod windows_host {
                 (*state_ptr)
                     .runtime
                     .set_overlay_reference_rect(primary_x, primary_y, primary_w, primary_h);
+                // Hide the cursor during full screensaver playback. Windows
+                // maintains a per-thread visibility counter — one decrement
+                // is enough here, and the matching `ShowCursor(TRUE)` is
+                // paired in WM_NCDESTROY. Preview mode leaves the cursor
+                // alone (Personalization's preview pane needs it).
+                ShowCursor(0);
+                (*state_ptr).cursor_hidden = true;
             } else {
                 (*state_ptr).runtime.clear_overlay_reference_rect();
             }
@@ -1136,15 +1162,11 @@ mod windows_host {
                         && state.launch_instant.elapsed().as_millis() >= INPUT_GRACE_MS
                     {
                         let mut point: POINT = std::mem::zeroed();
-                        if GetCursorPos(&mut point) != 0 {
-                            if let Some((last_x, last_y)) = state.last_cursor {
-                                if (last_x - point.x).abs() > JITTER_THRESHOLD_PX
-                                    || (last_y - point.y).abs() > JITTER_THRESHOLD_PX
-                                {
-                                    DestroyWindow(hwnd);
-                                }
-                            }
-                            state.last_cursor = Some((point.x, point.y));
+                        if GetCursorPos(&mut point) != 0
+                            && detect_and_handle_shake(state, point.x, point.y)
+                        {
+                            spawn_config_dialog();
+                            DestroyWindow(hwnd);
                         }
                     }
                 }
@@ -1177,6 +1199,11 @@ mod windows_host {
             WM_NCDESTROY => {
                 let state_ptr = take_state_ptr(hwnd);
                 if !state_ptr.is_null() {
+                    if (*state_ptr).cursor_hidden {
+                        // Restore the cursor visibility counter — pairs with
+                        // the ShowCursor(FALSE) we did at window create.
+                        ShowCursor(1);
+                    }
                     drop(Box::from_raw(state_ptr));
                 }
                 return 0;
@@ -1184,6 +1211,68 @@ mod windows_host {
             _ => {}
         }
         DefWindowProcW(hwnd, msg, 0, lparam)
+    }
+
+    /// Feed one cursor sample into the rolling path and return `true`
+    /// when the shake threshold is crossed. Drains samples older than
+    /// `SHAKE_WINDOW_MS` on every call so the window slides. Path length
+    /// is the sum of pixel distances between successive samples; a
+    /// "reversal" is a sign flip on either axis of the delta vector.
+    fn detect_and_handle_shake(state: &mut HostState, x: i32, y: i32) -> bool {
+        let now = std::time::Instant::now();
+        let cutoff = now
+            .checked_sub(std::time::Duration::from_millis(SHAKE_WINDOW_MS as u64))
+            .unwrap_or(now);
+        while state
+            .cursor_path
+            .front()
+            .is_some_and(|(when, _, _)| *when < cutoff)
+        {
+            state.cursor_path.pop_front();
+        }
+        state.cursor_path.push_back((now, x, y));
+        // Need at least 4 samples to have 2 direction deltas to compare.
+        if state.cursor_path.len() < 4 {
+            return false;
+        }
+        let mut total_path: i32 = 0;
+        let mut reversals: u32 = 0;
+        let mut prev_dx_sign: i32 = 0;
+        let mut prev_dy_sign: i32 = 0;
+        let mut samples = state.cursor_path.iter();
+        let (_, mut prev_x, mut prev_y) = *samples.next().expect("path non-empty by length check");
+        for &(_, cx, cy) in samples {
+            let dx = cx - prev_x;
+            let dy = cy - prev_y;
+            total_path += dx.abs().max(dy.abs());
+            let sx = dx.signum();
+            let sy = dy.signum();
+            if sx != 0 && prev_dx_sign != 0 && sx != prev_dx_sign {
+                reversals += 1;
+            }
+            if sy != 0 && prev_dy_sign != 0 && sy != prev_dy_sign {
+                reversals += 1;
+            }
+            if sx != 0 {
+                prev_dx_sign = sx;
+            }
+            if sy != 0 {
+                prev_dy_sign = sy;
+            }
+            prev_x = cx;
+            prev_y = cy;
+        }
+        total_path >= SHAKE_PATH_MIN_PX && reversals >= SHAKE_REVERSALS_MIN
+    }
+
+    /// Fire-and-forget spawn of our own exe in `/c 0` mode — the same
+    /// entry Windows Personalization uses for "Settings…". The screensaver
+    /// window will DestroyWindow itself immediately after, so the config
+    /// dialog isn't fighting a topmost window for focus.
+    fn spawn_config_dialog() {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).args(["/c", "0"]).spawn();
+        }
     }
 
     unsafe fn state_mut(hwnd: HWND) -> Option<&'static mut HostState> {

@@ -24,6 +24,10 @@ wgpu = "28"
 eframe = { version = "0.28", default-features = false, features = ["default_fonts", "glow", "persistence"] }
 egui = "0.28"
 rfd = "0.14"
+# QR generator for the Share pane. `qrcode` is MIT/Apache, small, pure
+# Rust — no image encoder pulled in because we render its bit matrix
+# directly into an egui image.
+qrcode = { version = "0.14", default-features = false }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

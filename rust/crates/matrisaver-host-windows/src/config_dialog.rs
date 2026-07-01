@@ -73,7 +73,30 @@ struct StatusMessage {
     until: Instant,
 }
 
+/// Shake-to-menu top-level view. The screensaver's own shake-detector
+/// spawns `./exe /c 0` when it fires; this dialog is the "menu" that
+/// shows up. Options is the existing settings pane; About + Share are
+/// the two new ones from the feature request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Options,
+    About,
+    Share,
+}
+
+/// URL the Share tab encodes into the QR + shows as text. Also used by
+/// the About tab's "Repository" line. Single source of truth so the QR
+/// and the text can't drift.
+const REPO_URL: &str = "https://github.com/ophiocus/matrisaver";
+/// First public release. Hardcoded rather than derived from a git tag —
+/// tag history can be rewritten (see the release-policy carve-out), a
+/// const cannot. Update by hand on the (unlikely) day the first-release
+/// date needs a correction.
+const FIRST_RELEASE_MONTH: &str = "2026-05";
+
 struct ConfigApp {
+    /// Which tab (menu view) is showing.
+    active_tab: Tab,
     /// The user's working copy. All UI mutates this. Disk is only
     /// touched on Apply or explicit Export.
     working: Settings,
@@ -89,6 +112,10 @@ struct ConfigApp {
     download_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     /// Transient banner shown in the Advanced section.
     status: Option<StatusMessage>,
+    /// Cached QR texture for the Share pane. Built once on first render
+    /// of the Share tab; the URL is a const, so no invalidation is
+    /// possible.
+    qr_texture: Option<egui::TextureHandle>,
 }
 
 impl ConfigApp {
@@ -106,12 +133,14 @@ impl ConfigApp {
         });
 
         Self {
+            active_tab: Tab::Options,
             working: settings.clone(),
             on_disk: settings,
             update_rx: Some(rx),
             update_status: UpdateStatus::Checking,
             download_rx: None,
             status: None,
+            qr_texture: None,
         }
     }
 
@@ -183,11 +212,19 @@ impl eframe::App for ConfigApp {
         // check polling stays live without blocking on input.
         ctx.request_repaint_after(Duration::from_millis(200));
 
+        egui::TopBottomPanel::top("tabs")
+            .resizable(false)
+            .show(ctx, |ui| self.render_tabs(ui));
+
         egui::TopBottomPanel::bottom("actions")
             .resizable(false)
             .show(ctx, |ui| self.render_footer(ui, ctx));
 
-        egui::CentralPanel::default().show(ctx, |ui| self.render_main(ui));
+        egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
+            Tab::Options => self.render_main(ui),
+            Tab::About => self.render_about(ui),
+            Tab::Share => self.render_share(ui, ctx),
+        });
     }
 }
 
@@ -714,6 +751,154 @@ impl ConfigApp {
             ),
         }
     }
+
+    /// Tab strip: Options / About / Share, plus a right-aligned Exit
+    /// that quits the whole process (satisfies the "Exit" menu item
+    /// from the shake-menu feature request — the dialog is where the
+    /// user lands after shaking, so Exit here is the app-level exit).
+    fn render_tabs(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let tab = |ui: &mut egui::Ui, current: &mut Tab, target: Tab, label: &str| {
+                let selected = *current == target;
+                if ui.selectable_label(selected, label).clicked() {
+                    *current = target;
+                }
+            };
+            tab(ui, &mut self.active_tab, Tab::Options, "Options");
+            tab(ui, &mut self.active_tab, Tab::About, "About");
+            tab(ui, &mut self.active_tab, Tab::Share, "Share");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Exit").clicked() {
+                    std::process::exit(0);
+                }
+            });
+        });
+    }
+
+    /// About pane. Static text; nothing here mutates state.
+    fn render_about(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(12.0);
+        ui.heading("MatriSaver");
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(concat!(
+                "Matrix-code screensaver with per-variant overlay lifecycle, ",
+                "cover-scaled silhouettes, and in-runtime mask synthesis."
+            ))
+            .weak(),
+        );
+
+        ui.add_space(14.0);
+        egui::Grid::new("about-grid")
+            .num_columns(2)
+            .spacing([16.0, 6.0])
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Version").strong());
+                ui.label(env!("CARGO_PKG_VERSION"));
+                ui.end_row();
+
+                ui.label(egui::RichText::new("First release").strong());
+                ui.label(FIRST_RELEASE_MONTH);
+                ui.end_row();
+
+                ui.label(egui::RichText::new("Author").strong());
+                ui.label("ophiocus");
+                ui.end_row();
+
+                ui.label(egui::RichText::new("Repository").strong());
+                ui.hyperlink(REPO_URL);
+                ui.end_row();
+
+                ui.label(egui::RichText::new("License").strong());
+                ui.label("MIT");
+                ui.end_row();
+            });
+
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Credits").strong());
+        ui.add_space(4.0);
+        ui.label("• Rezmason — MIT-licensed Matrix Resurrections glyph set");
+        ui.label("• Warner Bros. — official Matrix Code NFT footage (CC personal-use)");
+        ui.label("• Original silhouette art (Rogers v. Grimaldi) commissioned per release");
+    }
+
+    /// Share pane. Renders the repo URL as a QR code above the URL
+    /// text so the user can either scan it with a phone or copy it
+    /// (no explicit copy button — the URL is selectable text).
+    fn render_share(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.add_space(12.0);
+        ui.heading("Share MatriSaver");
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Scan with a phone or copy the URL — both land on the project's \
+                 GitHub page.",
+            )
+            .weak(),
+        );
+        ui.add_space(12.0);
+
+        let texture = self
+            .qr_texture
+            .get_or_insert_with(|| build_qr_texture(ctx, REPO_URL));
+        // QR is a square. Size it to a comfortable ~300 CSS px regardless of
+        // the underlying pixel resolution.
+        let size = egui::vec2(300.0, 300.0);
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            ui.add(egui::Image::new((texture.id(), size)));
+        });
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            ui.monospace(REPO_URL);
+        });
+    }
+}
+
+/// Rasterise a QR of `content` into an egui texture. Each dark module
+/// gets `MODULE_PX` × `MODULE_PX` black pixels; light modules are
+/// white. `QUIET_MODULES` of white padding surround the code (spec
+/// requires ≥ 4 modules for scanability). Called once per Share-tab
+/// first-render.
+fn build_qr_texture(ctx: &egui::Context, content: &str) -> egui::TextureHandle {
+    use qrcode::{EcLevel, QrCode};
+    const MODULE_PX: usize = 6;
+    const QUIET_MODULES: usize = 4;
+
+    let code = QrCode::with_error_correction_level(content, EcLevel::M)
+        .expect("repo URL is short and known-good");
+    let modules = code.width();
+    let bits: Vec<qrcode::Color> = code.into_colors();
+
+    let total_modules = modules + QUIET_MODULES * 2;
+    let px = total_modules * MODULE_PX;
+    let mut pixels = vec![255u8; px * px * 4];
+
+    for row in 0..modules {
+        for col in 0..modules {
+            if bits[row * modules + col] == qrcode::Color::Dark {
+                let px_x0 = (col + QUIET_MODULES) * MODULE_PX;
+                let px_y0 = (row + QUIET_MODULES) * MODULE_PX;
+                for dy in 0..MODULE_PX {
+                    for dx in 0..MODULE_PX {
+                        let i = ((px_y0 + dy) * px + (px_x0 + dx)) * 4;
+                        pixels[i] = 0;
+                        pixels[i + 1] = 0;
+                        pixels[i + 2] = 0;
+                        pixels[i + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+
+    let image = egui::ColorImage::from_rgba_unmultiplied([px, px], &pixels);
+    ctx.load_texture("share-qr", image, egui::TextureOptions::NEAREST)
 }
 
 /// Download the MSI from `url` to `%TEMP%\matrisaver-<version>.msi`,
