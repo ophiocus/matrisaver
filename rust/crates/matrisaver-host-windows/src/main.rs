@@ -13,6 +13,12 @@ use update_check::UpdateCheckResult;
 #[cfg(target_os = "windows")]
 mod config_dialog;
 
+// 3D present pass (reloaded variant). Wraps the offscreen 2D code
+// cascade onto a rotating cylinder of vertical strips. Windows-only —
+// the wgpu presenter it composes with lives inside the same cfg gate.
+#[cfg(target_os = "windows")]
+mod present_3d;
+
 use matrisaver_core::config::{GlowQuality, Pipeline};
 use matrisaver_core::gpu::GpuSelectionOptions;
 use matrisaver_core::storage;
@@ -474,6 +480,8 @@ fn run_runtime_benchmark(
 #[cfg(target_os = "windows")]
 mod windows_host {
     use super::HostAction;
+    use crate::present_3d;
+    use matrisaver_core::config::Pipeline;
     use matrisaver_core::gpu::GpuSelectionOptions;
     use matrisaver_core::CoreRuntime;
     use raw_window_handle::{
@@ -507,6 +515,9 @@ mod windows_host {
         present_pipeline: wgpu::RenderPipeline,
         present_bind_group_layout: wgpu::BindGroupLayout,
         present_sampler: wgpu::Sampler,
+        present_3d: present_3d::Present3d,
+        start_instant: std::time::Instant,
+        logged_choice: bool,
     }
 
     impl WindowPresenter {
@@ -740,6 +751,12 @@ mod windows_host {
                 cache: None,
             });
 
+            let present_3d = present_3d::Present3d::new(
+                &device,
+                format,
+                (surface_config.width, surface_config.height),
+            );
+
             Ok(Self {
                 surface,
                 device,
@@ -749,6 +766,9 @@ mod windows_host {
                 present_pipeline,
                 present_bind_group_layout,
                 present_sampler,
+                present_3d,
+                start_instant: std::time::Instant::now(),
+                logged_choice: false,
             })
         }
 
@@ -768,6 +788,7 @@ mod windows_host {
             self.surface_config.width = width.max(1);
             self.surface_config.height = height.max(1);
             self.surface.configure(&self.device, &self.surface_config);
+            self.present_3d.resize(&self.device, width, height);
         }
 
         fn render(&mut self, runtime: &CoreRuntime) -> Result<(), String> {
@@ -794,6 +815,44 @@ mod windows_host {
             let scene_view = runtime.gpu_scaffold_output_view().ok_or_else(|| {
                 "Core scaffold output was not initialized for lifecycle mode".to_owned()
             })?;
+
+            // Variant selects the present path. CodeStrips3D wraps the
+            // offscreen scene onto rotating 3D geometry; every other
+            // pipeline blits it flat via the fullscreen-triangle pass.
+            let use_3d = matches!(runtime.runtime_config().pipeline, Pipeline::CodeStrips3D);
+            if !self.logged_choice {
+                self.logged_choice = true;
+                eprintln!(
+                    "PRESENT_CHOICE variant={} pipeline={:?} use_3d={} surface={}x{}",
+                    runtime.settings().variant,
+                    runtime.runtime_config().pipeline,
+                    use_3d,
+                    self.surface_config.width,
+                    self.surface_config.height,
+                );
+            }
+
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("matrisaver-window-encoder"),
+                });
+
+            if use_3d {
+                let elapsed = self.start_instant.elapsed().as_secs_f32();
+                self.present_3d.record_pass(
+                    &self.queue,
+                    &self.device,
+                    &mut encoder,
+                    &view,
+                    scene_view,
+                    elapsed,
+                );
+                self.queue.submit([encoder.finish()]);
+                frame.present();
+                return Ok(());
+            }
+
             let present_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("matrisaver-window-present-bind-group"),
                 layout: &self.present_bind_group_layout,
@@ -809,11 +868,6 @@ mod windows_host {
                 ],
             });
 
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("matrisaver-window-encoder"),
-                });
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("matrisaver-window-render-pass"),

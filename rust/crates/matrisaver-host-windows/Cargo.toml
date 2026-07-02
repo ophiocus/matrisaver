@@ -18,6 +18,9 @@ serde_json = "1"
 pollster = "0.4"
 raw-window-handle = "0.6"
 wgpu = "28"
+# Pod/Zeroable derives for the 3D present pass's vertex + uniform
+# structs (present_3d module). Same version as matrisaver-core.
+bytemuck = { version = "1.21", features = ["derive"] }
 # Settings dialog for /c mode. eframe drives the egui window; rfd is the
 # native file-picker for the Advanced section's Import/Export buttons.
 # Both gated on Windows because /c mode is Windows-only.

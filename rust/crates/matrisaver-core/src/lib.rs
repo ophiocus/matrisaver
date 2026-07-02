@@ -35,6 +35,14 @@ pub mod config {
         Cpu,
         #[serde(rename = "cpu_glow")]
         CpuGlow,
+        /// Reloaded-era 3D compositor. The 2D code cascade renders to
+        /// the same offscreen scene texture as OpenGl, but the present
+        /// pass wraps that texture onto animated 3D geometry (a
+        /// rotating cylinder of vertical "code strips") instead of
+        /// blitting flat. Matches the Trinity-falls dream / Neo's
+        /// code-vision look: code as texture on 3D surfaces.
+        #[serde(rename = "code_strips_3d")]
+        CodeStrips3D,
     }
 
     impl Pipeline {
@@ -43,6 +51,7 @@ pub mod config {
                 Self::OpenGl => "opengl",
                 Self::Cpu => "cpu",
                 Self::CpuGlow => "cpu_glow",
+                Self::CodeStrips3D => "code_strips_3d",
             }
         }
 
@@ -51,6 +60,7 @@ pub mod config {
                 Self::OpenGl => "OpenGL Shader",
                 Self::Cpu => "CPU",
                 Self::CpuGlow => "CPU Glow",
+                Self::CodeStrips3D => "3D Code Strips (Reloaded)",
             }
         }
     }
@@ -265,33 +275,64 @@ pub mod config {
             vfx_gamma: 1.1,
         },
         VariantConfig {
+            // Reloaded 2003: the code is no longer a clean top-down
+            // cascade — it's projected onto 3D surfaces (Trinity-falls
+            // dream, Neo's code-vision, the operator consoles), wrapping
+            // buildings and forms. Reference: THE MATRIX RELOADED dream
+            // sequence (Trinity gets shot premonition) and the Neo-
+            // catches-Trinity code cutscene. The signature look is
+            // "wet luminous chunks" — big bloom, soft edges, longer
+            // dwell per glyph, slower churn — not the crisp/dry ticker
+            // of the 1999 opening titles. Colour reads brighter and
+            // more saturated than 1999's institutional fluorescent
+            // green, with a slight cool lean.
             key: "reloaded",
             name: "The Matrix Reloaded (2003)",
-            color: (0, 255, 90),
+            color: (25, 245, 100),
             overlay_tint: None,
             overlay_subdir: Some("reloaded"),
             overlay_full_pitch: false,
             overlay_skip_preview: false,
             overlay_sample_color: true,
-            speed_range: (6, 14),
-            density: 0.9,
+            // Slower than 1999 — Reloaded's code churns and drapes; it
+            // doesn't machinegun. The upper bound stays finite so the
+            // occasional column can still sprint through, but the
+            // median cascade is deliberately unhurried.
+            speed_range: (3, 8),
+            density: 0.85,
             symbol_set: SymbolSet::KatakanaSymbolsLatin,
-            glow_color: (200, 255, 200),
-            pause_chance: 0.015,
-            jitter_chance: 0.04,
-            ghost_chance: 0.15,
-            ghost_swap_multiplier: 10.0,
-            trail_length_multiplier: 1.5,
-            volatile_chance: 0.4,
-            gamma_range: (0.7, 1.3),
-            bloom_range: (0.2, 0.9),
-            head_bloom: 2.2,
-            font_strength: 1.0,
-            pipeline: Pipeline::OpenGl,
-            vfx_glow_strength: 1.2,
-            vfx_glow_radius: 1.8,
-            vfx_glow_threshold: 0.55,
-            vfx_gamma: 1.1,
+            // White-green wash, wetter than 1999's phosphor halo.
+            glow_color: (180, 255, 190),
+            pause_chance: 0.03,
+            jitter_chance: 0.02,
+            // Chunks morph often, but each swap holds — the multiplier
+            // stretches the dwell between swaps so glyphs read as
+            // chunks-that-shift, not a ticker.
+            ghost_chance: 0.28,
+            ghost_swap_multiplier: 18.0,
+            trail_length_multiplier: 3.5,
+            volatile_chance: 0.55,
+            // Wider dynamic range than 1999 (0.9-1.1): deep shadows
+            // set off the hot luminous cells.
+            gamma_range: (0.6, 1.4),
+            // Bloom biased high — Reloaded's cells glow, they don't tick.
+            bloom_range: (0.35, 1.1),
+            head_bloom: 3.2,
+            font_strength: 1.15,
+            // Reloaded is the first variant to run on the 3D compositor:
+            // the 2D code cascade above renders to an offscreen texture,
+            // and the present pass wraps that texture onto a rotating
+            // cylinder of vertical strips. The cascade tuning above
+            // shapes what's on the strips; the pipeline choice shapes
+            // how those strips move through space.
+            pipeline: Pipeline::CodeStrips3D,
+            // Softer, larger, lower-threshold bloom — every bright cell
+            // haloes; the aggregate reads as a luminous field, not a
+            // scatter of pinpoints.
+            vfx_glow_strength: 1.9,
+            vfx_glow_radius: 2.6,
+            vfx_glow_threshold: 0.42,
+            vfx_gamma: 1.05,
         },
         VariantConfig {
             key: "revolutions",
@@ -1043,7 +1084,15 @@ impl CoreRuntime {
         let char_size = settings.char_size;
         let variant = config::variant_by_key(&settings.variant).unwrap_or(&config::VARIANTS[0]);
         let mut runtime_config = variant.to_runtime(settings.char_size);
-        runtime_config.pipeline = settings.pipeline;
+        // Settings.pipeline picks the engine (OpenGL vs CPU fallback) —
+        // but a variant that explicitly demands a specialised compositor
+        // (e.g. Reloaded's `CodeStrips3D`) must win, because those
+        // variants only read right on their intended pipeline. Give the
+        // user's engine choice priority elsewhere.
+        runtime_config.pipeline = match variant.pipeline {
+            config::Pipeline::CodeStrips3D => config::Pipeline::CodeStrips3D,
+            _ => settings.pipeline,
+        };
         runtime_config.sanitize();
         let atlas =
             renderer::GlyphAtlas::from_symbols(&runtime_config.symbols, settings.char_size, 4096);

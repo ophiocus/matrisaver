@@ -11,6 +11,88 @@ For commit-level history use `git log`.
 
 (no entries yet)
 
+## [0.3.7] — 2026-07-01
+
+The **Reloaded 3D compositor** — first cut of a per-variant rendering
+engine that translates specific Matrix Reloaded scenes into geometric
+primitives. The variant retune from v0.3.6 laid the cascade values;
+this release adds the pipeline that wraps that cascade onto 3D forms.
+
+### Added
+
+- **`Pipeline::CodeStrips3D`** — new render pipeline. The 2D code
+  cascade renders offscreen exactly as before (full lifecycle, glyph
+  swap, bloom, overlays, all of it) but the present pass wraps that
+  scene texture onto animated 3D geometry instead of blitting flat.
+  Selected automatically when the active variant demands it — a
+  variant's `pipeline` field now overrides `settings.pipeline` for
+  variants that require a specialised compositor.
+- **Four-pose animation cycle** (24s loop) with smoothstep-eased
+  ramps between poses:
+  1. **FLAT** (4s hold, 2s ramp) — dense uniform matrix rain filling
+     the frame. Imitates the 1999 opening titles.
+  2. **CYLINDER** (4s hold, 2s ramp) — curved wall of code wrapping
+     around an off-axis orbiting camera with 12° tilt. Matches
+     Neo's dream-code cutscene (Trinity-falls premonition).
+  3. **TUBE + CLOCK FACE** (4s hold, 2s ramp) — code-tunnel fly-
+     through with a circular disc of code floating at the vanishing
+     point. Directly reproduces the Reloaded inception moment where
+     code assembles into a recognisable shape as the camera advances.
+  4. **SHATTER** (4s hold, 2s ramp) — four flat panes of code at
+     wild 3D angles with camera parallax drift. Matches the dream
+     sequence's shattered-mirror-of-code fragments.
+- **Reloaded variant wired to `CodeStrips3D`** — picking `reloaded`
+  in settings routes to the new compositor automatically. Other
+  variants remain on their existing pipelines.
+- **Diagnostic `PRESENT_CHOICE` line** emitted to stderr on the
+  first render call per presenter — surfaces variant name, resolved
+  pipeline, `use_3d` flag, and surface size. Cheap, one-shot per
+  presenter, useful for support.
+
+### Changed
+
+- **`reloaded` VariantConfig retuned** for the wet-luminous-chunks
+  aesthetic seen in the actual Reloaded code cutscenes (Trinity-
+  falls dream, Neo catches Trinity). Direct comparison against
+  extracted film frames drove every value:
+  - `color`: `(0, 255, 90)` → `(25, 245, 100)` — cooler, more saturated
+  - `speed_range`: `(6, 14)` → `(3, 8)` — Reloaded's code churns, doesn't machinegun
+  - `glow_color`: `(200, 255, 200)` → `(180, 255, 190)` — wetter white-green wash
+  - `ghost_chance`: `0.15` → `0.28` — chunks morph more often
+  - `ghost_swap_multiplier`: `10.0` → `18.0` — but hold longer between swaps
+  - `trail_length_multiplier`: `1.5` → `3.5` — long luminous chunks
+  - `volatile_chance`: `0.4` → `0.55` — more columns actively swapping
+  - `gamma_range`: `(0.7, 1.3)` → `(0.6, 1.4)` — wider dynamic range
+  - `bloom_range`: `(0.2, 0.9)` → `(0.35, 1.1)` — bloom heavily biased high
+  - `head_bloom`: `2.2` → `3.2` — brighter heads
+  - `vfx_glow_strength`: `1.2` → `1.9`
+  - `vfx_glow_radius`: `1.8` → `2.6`
+  - `vfx_glow_threshold`: `0.55` → `0.42`
+- **Runtime pipeline resolution**: when a variant's `pipeline` is
+  `CodeStrips3D`, that choice wins over `settings.pipeline` — a
+  variant that demands a specialised compositor can't be broken
+  by a stale user engine preference.
+
+### Fixed
+
+- **Fog attenuation** in the 3D pass now uses linearised view-space
+  distance (`length(world_pos)`) instead of clip-space `z/w`. The
+  old formulation compressed against the far plane and pegged
+  everything to min-clamp; the new one gives a gentle radial
+  attenuation from the near ring outward.
+- **Far plane** moved from 8 → 20 world units so the tube's clock-
+  face disc (at world Z=-3.2, camera-distance up to 9.2) no longer
+  gets frustum-clipped at parts of the drift cycle.
+
+### Dependencies
+
+- Added `bytemuck = "1.21"` to `matrisaver-host-windows` for the
+  vertex/uniform Pod derives in the new `present_3d` module.
+
+---
+
+
+
 ## [0.3.6] — 2026-06-03
 
 First cut of the shake-to-menu feature request
