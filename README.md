@@ -1,6 +1,6 @@
 # MatriSaver
 
-![MatriSaver — digital rain banner](assets/branding/hero-rain.jpg)
+![MatriSaver — digital rain screensaver for Windows](assets/branding/banner.jpg)
 
 <p align="center">
   <img src="assets/branding/logo.png" width="160" alt="MatriSaver logo" />
