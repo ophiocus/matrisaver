@@ -1,0 +1,98 @@
+#!/bin/sh
+# Idle-launch wrapper for MatriSaver.
+#
+# MatriSaver does not watch for idleness itself, on purpose: every
+# desktop already ships an idle daemon, and a second one competing with
+# the session's own inhibitors (a full-screen video, a presentation
+# mode) is how a screensaver earns a reputation for interrupting people.
+# This script picks the daemon that matches the running session and hands
+# it MatriSaver as the thing to run.
+#
+# It is also explicitly NOT a locker. MatriSaver draws; it does not
+# authenticate. Keep your desktop's own lock in charge of locking, and
+# chain it after the screensaver if you want both.
+#
+# Usage:
+#   matrisaver-idle [IDLE_SECONDS] [-- matrisaver args...]
+#
+# Environment:
+#   MATRISAVER_IDLE_SECONDS   default idle timeout (default 300)
+#   MATRISAVER_IDLE_DAEMON    force swayidle | xautolock | xss-lock
+
+set -eu
+
+BIN="${MATRISAVER_BIN:-/usr/bin/matrisaver}"
+IDLE_SECONDS="${MATRISAVER_IDLE_SECONDS:-300}"
+
+case "${1:-}" in
+    ''|--) : ;;
+    *[!0-9]*) : ;;
+    *) IDLE_SECONDS="$1"; shift ;;
+esac
+if [ "${1:-}" = "--" ]; then
+    shift
+fi
+
+if [ ! -x "$BIN" ]; then
+    echo "matrisaver-idle: $BIN is not executable" >&2
+    exit 1
+fi
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+daemon="${MATRISAVER_IDLE_DAEMON:-}"
+if [ -z "$daemon" ]; then
+    if [ -n "${WAYLAND_DISPLAY:-}" ] && have swayidle; then
+        daemon=swayidle
+    elif have xautolock; then
+        daemon=xautolock
+    elif have xss-lock; then
+        daemon=xss-lock
+    elif have swayidle; then
+        daemon=swayidle
+    fi
+fi
+
+case "$daemon" in
+    swayidle)
+        # -w waits for the command to finish before resuming, so the
+        # resume hook cannot race the screensaver going away.
+        exec swayidle -w \
+            timeout "$IDLE_SECONDS" "$BIN --run $*" \
+            resume "pkill -x matrisaver || true"
+        ;;
+    xautolock)
+        # xautolock is the X11 idle *runner* (as opposed to xss-lock,
+        # which exists to drive a real locker).
+        # xautolock counts in whole minutes, floor 1.
+        minutes=$(( IDLE_SECONDS / 60 ))
+        if [ "$minutes" -lt 1 ]; then
+            minutes=1
+        fi
+        exec xautolock -time "$minutes" -locker "$BIN --run $*" -detectsleep
+        ;;
+    xss-lock)
+        # Present for completeness. xss-lock expects its child to be a
+        # locker; MatriSaver is not one, so the session is NOT secured by
+        # this arrangement — it only means "run MatriSaver when the X
+        # screensaver fires". Set the idle timeout with `xset s`.
+        echo "matrisaver-idle: using xss-lock; MatriSaver does not lock the session." >&2
+        exec xss-lock -- "$BIN" --run "$@"
+        ;;
+    *)
+        cat >&2 <<'EOF'
+matrisaver-idle: no supported idle daemon found.
+
+Install one of:
+    swayidle    (Wayland: sway, Hyprland, river, ...)
+    xautolock   (X11)
+    xss-lock    (X11, if you already drive a locker with it)
+
+GNOME and KDE manage idle themselves and do not need this wrapper; point
+their own screen-blank settings at MatriSaver, or run it manually:
+
+    matrisaver --run
+EOF
+        exit 1
+        ;;
+esac

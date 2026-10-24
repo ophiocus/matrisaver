@@ -40,6 +40,7 @@ jobs:
             binary: matrisaver-host-linux
             artifact_name: matrisaver-linux
             build_msi: false
+            build_deb: true
           - os: macos-latest
             host_crate: matrisaver-host-macos
             binary: matrisaver-host-macos
@@ -92,6 +93,20 @@ jobs:
       - name: cargo build --release
         run: cargo build --release -p ${{ matrix.host_crate }}
 
+      # dpkg-deb is in the base image; the script needs nothing else and
+      # runs unprivileged (--root-owner-group). SOURCE_DATE_EPOCH pins the
+      # Debian changelog date to the tagged commit so the package is
+      # reproducible rather than carrying the runner's clock.
+      - name: Build .deb package
+        if: matrix.build_deb
+        working-directory: .
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          scripts/package-deb.sh \
+            --skip-build \
+            --binary rust/target/release/matrisaver-host-linux \
+            --out artifacts
+
       - name: Install cargo-wix
         if: matrix.build_msi
         run: cargo install cargo-wix
@@ -128,6 +143,13 @@ jobs:
           name: matrisaver-windows-msi
           path: rust/target/wix/*.msi
 
+      - name: Upload .deb
+        if: matrix.build_deb
+        uses: actions/upload-artifact@v5
+        with:
+          name: matrisaver-linux-deb
+          path: artifacts/*.deb
+
   release:
     needs: [build]
     runs-on: ubuntu-latest
@@ -147,4 +169,5 @@ jobs:
             artifacts/matrisaver-linux/matrisaver-host-linux
             artifacts/matrisaver-macos/matrisaver-host-macos
             artifacts/matrisaver-windows-msi/*.msi
+            artifacts/matrisaver-linux-deb/*.deb
           generate_release_notes: true

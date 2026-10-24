@@ -1,0 +1,24 @@
+Package: matrisaver
+Version: @VERSION@
+Section: x11
+Priority: optional
+Architecture: @ARCH@
+Maintainer: ophiocus <1540596+ophiocus@users.noreply.github.com>
+Homepage: https://github.com/ophiocus/matrisaver
+Depends: libc6 (>= 2.34)
+Recommends: mesa-vulkan-drivers | libgl1-mesa-dri
+Suggests: swayidle | xautolock | xss-lock
+Installed-Size: @INSTALLED_SIZE@
+Description: Matrix-inspired digital rain screensaver
+ MatriSaver renders the Matrix code cascade in native Rust on wgpu, with
+ five film-derived variants, an ASCII overlay that dissolves silhouettes
+ into the rain, and a per-variant 3D compositor for the Reloaded look.
+ .
+ Playback spans every monitor with one continuous scene: the rain does
+ not restart at a bezel. Vulkan is preferred, with an explicit fall back
+ to GL and a diagnostic line naming the rung that was reached.
+ .
+ MatriSaver is a screensaver, not a screen locker. It deliberately does
+ not authenticate or block input beyond its own window; locking stays
+ the desktop session's job. Integration helpers for swayidle, xautolock
+ and xss-lock ship in /usr/share/matrisaver/integration.

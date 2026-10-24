@@ -1,0 +1,11 @@
+matrisaver (@VERSION@) unstable; urgency=low
+
+  * Linux host and packaging (ROADMAP Milestone 3): multi-monitor
+    fullscreen playback, an explicit Vulkan-then-GL backend ladder, XDG
+    overlay pack discovery, and idle-integration helpers for swayidle,
+    xautolock and xss-lock.
+  * The upstream changelog is maintained in Keep a Changelog format,
+    not Debian format, so it ships beside this one as
+    /usr/share/doc/matrisaver/CHANGELOG.md.gz.
+
+ -- @MAINTAINER@  @DATE@

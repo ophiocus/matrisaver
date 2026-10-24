@@ -9,7 +9,115 @@ For commit-level history use `git log`.
 
 ## [Unreleased]
 
-(no entries yet)
+**Linux grows up** — ROADMAP Milestone 3. The Linux host stops being a
+headless benchmark stub and becomes a real screensaver, shipped as a
+`.deb`. Tracked as
+[#1](https://github.com/ophiocus/matrisaver/issues/1).
+
+### Added
+
+- **Multi-monitor Linux playback.** `matrisaver --run` fills every
+  output. Core renders **one** scene at the union bounding box of all
+  outputs and each per-output window presents its own UV sub-rectangle
+  of that scene, so the cascade is continuous across a bezel — columns
+  do not restart. One scene and N windows rather than N scenes is also
+  the only arrangement Wayland permits: a surface belongs to exactly one
+  output, so the spanning window the Windows `.scr` creates is not
+  expressible there. `--single-monitor` collapses to the primary output,
+  and the overlay reference rect is pinned to the primary in scene space
+  so silhouettes compose against one screen (mirroring the Windows
+  host's `SM_CXSCREEN` behaviour).
+- **`matrisaver_core::present`** — shared present passes. `SceneBlit` is
+  the flat blit, now with a UV-rectangle uniform, and `Present3d` is the
+  Reloaded 3D compositor. See *Changed* for why they moved.
+- **`UvRect`** with `from_sub_rect`, mapping an output's pixel rect to
+  normalized scene coordinates, degenerate extents falling back to the
+  full rect rather than emitting NaNs into the shader.
+- **Explicit GPU and compositor fallback.** Session detection
+  (`WAYLAND_DISPLAY` → wayland, `DISPLAY` → x11, `XDG_SESSION_TYPE` as a
+  last resort, `MATRISAVER_FORCE_SESSION` to override) and an ordered
+  backend ladder: explicit request → Vulkan → GL. Every demotion emits
+  `FALLBACK host=linux stage=… reason=…`, the successful rung is named in
+  the `SURFACE` line, and total failure lists what was tried. A span
+  wider than the texture limit demotes to primary-only rather than
+  showing nothing.
+- **Named exit codes**, documented in the man page and
+  `--help`: `0` ok, `1` runtime, `2` usage, `3` no usable GPU, `4` no
+  display session. Playback without a session now fails with guidance
+  (user-unit vs system-unit, `systemctl --user import-environment`)
+  instead of a bare winit error.
+- **Linux CLI parity with the Windows host** — `--variant`,
+  `--pipeline`, `--glow-quality`, `--overlay` / `--no-overlay`,
+  `--performance` / `--no-performance`, `--multi-monitor` /
+  `--single-monitor`, `--char-size`, `--settings`, the GPU selection
+  flags — plus `--window`, `--list-monitors`, `--show-cursor`,
+  `--lifecycle-frames`, `--lifecycle-trace` and `--help`. Unknown flags
+  and unparseable values are now rejected with exit 2 instead of being
+  ignored.
+- **`.deb` packaging** via `scripts/package-deb.sh` (`dpkg-deb` only, no
+  `cargo-deb`, no `fakeroot`, no privileges): `/usr/bin/matrisaver`, the
+  overlay pack, a man page, a `.desktop` entry, an icon, and idle
+  integration helpers for swayidle / xautolock / xss-lock behind a
+  `matrisaver-idle.service` **user** unit. lintian-clean; built on
+  Ubuntu 24.04 and install/remove verified on Debian 13. `release.yml`
+  builds and attaches it to the release.
+- **XDG overlay pack discovery** —
+  `$XDG_DATA_HOME/matrisaver/overlays`, `/usr/local/share/...`,
+  `/usr/share/matrisaver/overlays`, a per-user pack shadowing the system
+  one. See *Fixed*.
+- **Docs**: [`docs/development/LINUX_HOST.md`](docs/development/LINUX_HOST.md)
+  and [`docs/release/LINUX_PACKAGING.md`](docs/release/LINUX_PACKAGING.md),
+  both with an explicit "verified, and not" section.
+
+### Changed
+
+- **The 3D compositor moved from the Windows host into core**
+  (`matrisaver-host-windows/src/present_3d.rs` →
+  `matrisaver-core/src/present/three_d.rs`), and the Windows host's
+  inline flat blit became `core::present::SceneBlit`. The module only
+  ever depended on `bytemuck` + `wgpu`; leaving it in a host crate would
+  have meant either a second copy for Linux — which the thin-adapter
+  quality gate forbids ("no duplicated variant behavior across host
+  crates") — or the `reloaded` variant silently rendering flat on Linux.
+  The Windows host passes `UvRect::FULL`, making its present pass
+  pixel-identical to before.
+- **A bare `matrisaver-host-linux` invocation now plays** instead of
+  running the benchmark. The headless benchmark is behind its existing
+  `--benchmark-frames N` flag, with identical output. `/usr/bin/matrisaver`
+  with no arguments is what the `.desktop` entry and every idle example
+  invoke, so playback is the useful default.
+
+### Fixed
+
+- **Overlays resolved nowhere on a packaged Unix install.** Pack
+  discovery knew only `%ProgramData%\matrisaver\overlays` plus an
+  exe-relative `assets/overlays` ancestor walk. From
+  `/usr/bin/matrisaver` that walk probes `/usr/bin/assets/overlays`,
+  `/usr/assets/overlays` and `/assets/overlays`, none of which exist, so
+  a `.deb` would have shipped overlay art the runtime could never find.
+  `shipped_overlay_pack_dirs()` now returns the XDG and `/usr/share`
+  candidates on Unix, verified end to end from an installed-style prefix
+  with no `assets/` anywhere near the binary.
+
+### Known issues
+
+- **The GL rung segfaults during teardown under WSLg.** Every requested
+  frame renders correctly (the lifecycle trace confirms the full count at
+  1, 10 and 60 frames) and the process then crashes while exiting,
+  inside Mesa's EGL teardown. GL *offscreen* exits cleanly and the
+  Vulkan rung is clean at every frame count. WSLg ships a degraded EGL
+  stack (`ZINK: failed to choose pdev`, `egl: failed to create dri2
+  screen`), which is the likeliest cause, but no backtrace was
+  obtainable on the test host, so Mesa-on-WSLg versus a host teardown
+  ordering bug is unsettled. Vulkan leads the ladder, so GL is only
+  reached where Vulkan is absent.
+- **Multi-monitor is unit-tested, not run on hardware.** The WSLg test
+  host reports a single output.
+- **Idle integration ships documented, not validated per desktop.**
+  WSLg is not a desktop session, so there is no GNOME/KDE/sway idle
+  service to integrate against.
+- `Settings.multi_monitor` is honoured by the Linux host but still
+  ignored by the Windows host, which always spans the virtual screen.
 
 ## [0.3.7] — 2026-07-01
 

@@ -8,13 +8,17 @@
 
 MatriSaver is a Matrix-inspired digital rain screensaver written in
 native Rust + `wgpu`. Windows is the primary target (ships as an MSI
-that installs `matrisaver.scr` into `System32`); Linux and macOS host
-stubs build cleanly but aren't packaged yet.
+that installs `matrisaver.scr` into `System32`); Linux ships as a `.deb`
+with multi-monitor playback and idle-integration helpers; the macOS host
+builds cleanly but isn't packaged yet.
 
 ## Status
 
 - Windows host: full Win32 + `wgpu` lifecycle for `/s`, `/p`, and `/c` (egui settings dialog).
-- Linux / macOS hosts: build, benchmark, and run headless; native screensaver integration TBD.
+- Linux host: multi-monitor fullscreen playback on Wayland and X11,
+  shipped as a `.deb` with idle-integration helpers. See
+  [`docs/development/LINUX_HOST.md`](docs/development/LINUX_HOST.md).
+- macOS host: builds, benchmarks, and runs headless; native screensaver integration TBD.
 - Update flow: GitHub Releases API; in-app one-click install for the Windows MSI.
 
 ## Install on Windows
@@ -72,6 +76,31 @@ Direct `.scr` invocation from PowerShell will hit Windows'
 mode (`%1 /S`) — `/c` gets dropped. There's no clean shell incantation
 around that; use one of the two methods above.
 
+## Install on Linux
+
+Download the `.deb` from the [releases page](https://github.com/ophiocus/matrisaver/releases/latest):
+
+```bash
+sudo dpkg -i matrisaver_*_amd64.deb
+matrisaver --window           # take a look
+matrisaver --run              # fullscreen on every monitor
+man matrisaver                # every flag, and the exit codes
+```
+
+Idle integration is a systemd **user** unit wrapping your session's own
+idle daemon (swayidle, xautolock, ...):
+
+```bash
+systemctl --user enable --now matrisaver-idle.service
+```
+
+MatriSaver is a screensaver, not a screen locker — it does not
+authenticate, and any key dismisses it. Keep your desktop's lock in
+charge of locking. Details:
+[`docs/release/LINUX_PACKAGING.md`](docs/release/LINUX_PACKAGING.md).
+
+To build the package from source: `scripts/package-deb.sh`.
+
 ## Documentation
 
 Formal documentation tree: [`docs/README.md`](docs/README.md)
@@ -80,5 +109,7 @@ High-priority docs:
 
 - Architecture: [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)
 - Migration roadmap: [`docs/planning/ROADMAP.md`](docs/planning/ROADMAP.md)
+- Linux host: [`docs/development/LINUX_HOST.md`](docs/development/LINUX_HOST.md)
+- Debian packaging: [`docs/release/LINUX_PACKAGING.md`](docs/release/LINUX_PACKAGING.md)
 - Performance research cycle: [`docs/research/PERFORMANCE_RESEARCH_CYCLE_01.md`](docs/research/PERFORMANCE_RESEARCH_CYCLE_01.md)
 - Rust workspace/development: [`docs/development/RUST_WORKSPACE.md`](docs/development/RUST_WORKSPACE.md)

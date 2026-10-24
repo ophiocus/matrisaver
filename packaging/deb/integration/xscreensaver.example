@@ -1,0 +1,34 @@
+# xscreensaver and xss-lock — X11, read this before using either
+#
+# ── xscreensaver ─────────────────────────────────────────────────────
+#
+# xscreensaver runs each hack inside a window it owns and passes the
+# window id with -window-id. MatriSaver does NOT implement that protocol:
+# it creates its own fullscreen window per output. Adding it to the
+# `programs:` list therefore gives you a MatriSaver window *over* the
+# xscreensaver window, which works visually but leaves xscreensaver
+# unable to manage or unblank it, and the two fight over who owns the
+# screen.
+#
+# So: do not add MatriSaver to `programs:`. Use xautolock (see
+# xautolock.example) or swayidle instead, or drive it from a hotkey.
+#
+# Embedding into an xscreensaver -window-id window is tracked as future
+# work; see docs/development/LINUX_HOST.md.
+#
+# ── xss-lock ─────────────────────────────────────────────────────────
+#
+# xss-lock exists to drive a *locker* from the X screensaver signal. It
+# will happily run MatriSaver, but then the session is NOT secured —
+# xss-lock believes a locker is up while any keypress dismisses
+# MatriSaver. Only use this if you understand that, and set the idle
+# timeout with xset:
+
+xset s 300 300
+xss-lock -- matrisaver --run &
+
+# A defensible arrangement: MatriSaver as the xss-lock *notifier* (the
+# warning shown shortly before the real lock), with an actual locker
+# doing the locking:
+
+xss-lock --notifier='matrisaver --run' -- i3lock -c 000000 &
