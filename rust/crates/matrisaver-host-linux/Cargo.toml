@@ -7,3 +7,27 @@ authors.workspace = true
 
 [dependencies]
 matrisaver-core = { path = "../matrisaver-core" }
+
+# Playback dependencies are Linux-gated, mirroring how
+# matrisaver-host-windows gates its Win32 stack: the crate is a workspace
+# member on all three CI runners, and only the Linux leg needs a window
+# system. The headless benchmark path depends on nothing but core, so it
+# keeps working everywhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+# default-features = false drops the Android/web/macOS plumbing and, more
+# importantly, lets us pick the *dlopen* Wayland backend: linking
+# libwayland-client at build time would require libwayland-dev +
+# pkg-config on every build host (including CI and a bare WSL rootfs),
+# whereas dlopen resolves it at runtime from libwayland-client.so.0.
+# x11 goes through x11-dl, which is dlopen-only already.
+winit = { version = "0.30", default-features = false, features = [
+    "x11",
+    "wayland",
+    "wayland-dlopen",
+    "rwh_06",
+] }
+# Same wgpu major as matrisaver-core: the host creates the surfaces and
+# device, then hands them to core via
+# enable_gpu_scaffold_with_shared_device, so the types must match.
+wgpu = "28"
+pollster = "0.4"

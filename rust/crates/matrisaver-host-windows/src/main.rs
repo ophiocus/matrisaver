@@ -13,12 +13,6 @@ use update_check::UpdateCheckResult;
 #[cfg(target_os = "windows")]
 mod config_dialog;
 
-// 3D present pass (reloaded variant). Wraps the offscreen 2D code
-// cascade onto a rotating cylinder of vertical strips. Windows-only —
-// the wgpu presenter it composes with lives inside the same cfg gate.
-#[cfg(target_os = "windows")]
-mod present_3d;
-
 use matrisaver_core::config::{GlowQuality, Pipeline};
 use matrisaver_core::gpu::GpuSelectionOptions;
 use matrisaver_core::storage;
@@ -480,9 +474,9 @@ fn run_runtime_benchmark(
 #[cfg(target_os = "windows")]
 mod windows_host {
     use super::HostAction;
-    use crate::present_3d;
     use matrisaver_core::config::Pipeline;
     use matrisaver_core::gpu::GpuSelectionOptions;
+    use matrisaver_core::present::{Present3d, SceneBlit};
     use matrisaver_core::CoreRuntime;
     use raw_window_handle::{
         RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
@@ -512,10 +506,8 @@ mod windows_host {
         queue: wgpu::Queue,
         surface_config: wgpu::SurfaceConfiguration,
         selected_adapter: matrisaver_core::gpu::AdapterSnapshot,
-        present_pipeline: wgpu::RenderPipeline,
-        present_bind_group_layout: wgpu::BindGroupLayout,
-        present_sampler: wgpu::Sampler,
-        present_3d: present_3d::Present3d,
+        scene_blit: SceneBlit,
+        present_3d: Present3d,
         start_instant: std::time::Instant,
         logged_choice: bool,
     }
@@ -648,110 +640,8 @@ mod windows_host {
             };
             surface.configure(&device, &surface_config);
 
-            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("matrisaver-window-present-shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    "
-                    @group(0) @binding(0)
-                    var scene_tex: texture_2d<f32>;
-
-                    @group(0) @binding(1)
-                    var scene_sampler: sampler;
-
-                    struct VsOut {
-                        @builtin(position) position: vec4<f32>,
-                        @location(0) uv: vec2<f32>,
-                    };
-
-                    @vertex
-                    fn vs_main(@builtin(vertex_index) idx: u32) -> VsOut {
-                        var positions = array<vec2<f32>, 3>(
-                            vec2<f32>(-1.0, -3.0),
-                            vec2<f32>(3.0, 1.0),
-                            vec2<f32>(-1.0, 1.0)
-                        );
-                        let pos = positions[idx];
-                        var out: VsOut;
-                        out.position = vec4<f32>(pos, 0.0, 1.0);
-                        out.uv = pos * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
-                        return out;
-                    }
-
-                    @fragment
-                    fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-                        let color = textureSample(scene_tex, scene_sampler, in.uv).rgb;
-                        return vec4<f32>(color, 1.0);
-                    }
-                    "
-                    .into(),
-                ),
-            });
-
-            let present_bind_group_layout =
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("matrisaver-window-present-bind-group-layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                });
-            let present_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("matrisaver-window-present-sampler"),
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
-                address_mode_w: wgpu::AddressMode::ClampToEdge,
-                ..Default::default()
-            });
-
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("matrisaver-window-present-pipeline-layout"),
-                bind_group_layouts: &[&present_bind_group_layout],
-                immediate_size: 0,
-            });
-            let present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("matrisaver-window-present-pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
-
-            let present_3d = present_3d::Present3d::new(
+            let scene_blit = SceneBlit::new(&device, format);
+            let present_3d = Present3d::new(
                 &device,
                 format,
                 (surface_config.width, surface_config.height),
@@ -763,9 +653,7 @@ mod windows_host {
                 queue,
                 surface_config,
                 selected_adapter,
-                present_pipeline,
-                present_bind_group_layout,
-                present_sampler,
+                scene_blit,
                 present_3d,
                 start_instant: std::time::Instant::now(),
                 logged_choice: false,
@@ -853,47 +741,8 @@ mod windows_host {
                 return Ok(());
             }
 
-            let present_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("matrisaver-window-present-bind-group"),
-                layout: &self.present_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(scene_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.present_sampler),
-                    },
-                ],
-            });
-
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("matrisaver-window-render-pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.0,
-                                g: 0.01,
-                                b: 0.0,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                pass.set_pipeline(&self.present_pipeline);
-                pass.set_bind_group(0, &present_bind_group, &[]);
-                pass.draw(0..3, 0..1);
-            }
+            self.scene_blit
+                .record_pass(&self.device, &mut encoder, &view, scene_view);
 
             self.queue.submit([encoder.finish()]);
             frame.present();

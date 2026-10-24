@@ -35,7 +35,9 @@ This is the formal documentation tree for MatriSaver.
 
 - Rust workspace guide: [`development/RUST_WORKSPACE.md`](development/RUST_WORKSPACE.md)
 - WSL Rust tooling setup: [`development/WSL_RUST_TOOLING.md`](development/WSL_RUST_TOOLING.md)
+- Linux host (run modes, multi-monitor, GPU fallback): [`development/LINUX_HOST.md`](development/LINUX_HOST.md)
 
 ## Release
 
 - Signing and release process: [`release/SIGNING_AND_RELEASE_PROCESS.md`](release/SIGNING_AND_RELEASE_PROCESS.md)
+- Debian packaging (`.deb`): [`release/LINUX_PACKAGING.md`](release/LINUX_PACKAGING.md)

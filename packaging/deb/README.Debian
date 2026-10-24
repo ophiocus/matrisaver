@@ -1,0 +1,73 @@
+matrisaver for Debian / Ubuntu
+==============================
+
+Running it
+----------
+
+    matrisaver --run            fullscreen on every monitor
+    matrisaver --window         a single window, for a look
+    matrisaver --list-monitors  what the compositor reports
+    matrisaver --list-adapters  what wgpu can see
+    man matrisaver              every flag, and the exit codes
+
+Idle integration
+----------------
+
+MatriSaver does not watch for idleness. Every desktop already ships an
+idle daemon, and a competing one is how a screensaver ends up
+interrupting a presentation. Point your session's daemon at MatriSaver
+instead.
+
+GNOME and KDE manage idle and screen blanking themselves; use their own
+settings, or run MatriSaver from a keyboard shortcut.
+
+For sway, Hyprland, river and other Wayland sessions, and for plain X11
+sessions, a wrapper that picks the right daemon ships at
+/usr/libexec/matrisaver/matrisaver-idle, driven by a systemd **user**
+unit:
+
+    systemctl --user enable --now matrisaver-idle.service
+
+It must be a user unit. A system unit has no WAYLAND_DISPLAY or DISPLAY,
+so MatriSaver would exit 4 (no display session) every time. If the unit
+starts before your compositor has published its environment, add this to
+the compositor's autostart:
+
+    systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR
+
+Worked examples for each daemon are in
+/usr/share/matrisaver/integration.
+
+Not a screen locker
+-------------------
+
+MatriSaver draws; it does not authenticate, and it does not block input
+beyond its own window. Any key or mouse click dismisses it. Keep your
+desktop's own lock in charge of locking and chain it after the
+screensaver if you want both — do not substitute one for the other.
+
+GPU backends
+------------
+
+Vulkan is tried first, then GL. The chosen rung is reported on stderr:
+
+    SURFACE host=linux rung=vulkan backend=Vulkan adapter=... device_type=...
+
+Each demotion prints a FALLBACK line with a reason, and a total failure
+exits 3 with the list of what was tried. Install mesa-vulkan-drivers for
+the Vulkan path or libgl1-mesa-dri for the GL path; the package
+Recommends both so either is usually present.
+
+Overlays
+--------
+
+The ASCII silhouette overlay reads images from, in precedence order:
+
+    $MATRISAVER_OVERLAY_DIR
+    $XDG_DATA_HOME/matrisaver/overlays   (default ~/.local/share/...)
+    /usr/local/share/matrisaver/overlays
+    /usr/share/matrisaver/overlays       (shipped by this package)
+
+Drop high-contrast portraits or logos into the per-user directory to
+have them woven into the cycle; they take precedence over the shipped
+pack, so nothing needs root.

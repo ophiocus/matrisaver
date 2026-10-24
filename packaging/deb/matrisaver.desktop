@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=MatriSaver
+GenericName=Digital Rain Screensaver
+Comment=Matrix-inspired digital rain across every monitor
+Exec=matrisaver --run
+TryExec=matrisaver
+Icon=matrisaver
+Terminal=false
+Categories=Graphics;Amusement;
+Keywords=screensaver;matrix;rain;
+StartupNotify=false

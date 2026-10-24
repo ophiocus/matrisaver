@@ -894,6 +894,7 @@ pub mod renderer {
 }
 
 pub mod gpu;
+pub mod present;
 
 pub mod storage {
     use crate::config::Settings;

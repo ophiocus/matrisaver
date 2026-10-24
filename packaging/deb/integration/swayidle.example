@@ -1,0 +1,25 @@
+# swayidle — Wayland (sway, Hyprland, river, Niri, ...)
+#
+# Run MatriSaver after 5 minutes idle; kill it when the user comes back.
+# -w makes swayidle wait for the timeout command to finish, so `resume`
+# cannot race the screensaver going away.
+#
+# Add to the compositor config (sway: `exec ...`):
+
+exec swayidle -w \
+    timeout 300 'matrisaver --run' \
+    resume     'pkill -x matrisaver'
+
+# With the session lock chained after the screensaver. MatriSaver does
+# not lock, so if you want both, say both — and put the locker last so
+# it owns the screen:
+
+exec swayidle -w \
+    timeout 300  'matrisaver --run' \
+    resume       'pkill -x matrisaver' \
+    timeout 900  'swaylock -f' \
+    before-sleep 'swaylock -f'
+
+# Single monitor only, and the Reloaded 3D compositor:
+#
+#   timeout 300 'matrisaver --run --single-monitor --variant reloaded'

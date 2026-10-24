@@ -88,16 +88,66 @@ impl CoreRuntime {
         }
     }
 
-    /// The MSI installs the bundled overlay pack into
+    /// Overlay packs installed by a platform package, in precedence
+    /// order, filtered to the ones that actually exist.
+    ///
+    /// Windows: the MSI drops the pack into
     /// `%ProgramData%\matrisaver\overlays\`. `ProgramData` is reliably
-    /// set on Windows and absent elsewhere, so this naturally no-ops
-    /// on Linux/macOS.
-    fn programdata_overlays_dir() -> Option<std::path::PathBuf> {
-        let base = std::env::var_os("ProgramData")?;
-        let dir = std::path::PathBuf::from(base)
-            .join("matrisaver")
-            .join("overlays");
-        dir.is_dir().then_some(dir)
+    /// set there and absent elsewhere, so that candidate self-skips on
+    /// Unix.
+    ///
+    /// Unix: the `.deb` installs the pack into
+    /// `/usr/share/matrisaver/overlays`. The exe-relative
+    /// `assets/overlays` ancestor walk that serves the dev tree cannot
+    /// reach it — from `/usr/bin/matrisaver` it probes
+    /// `/usr/bin/assets/overlays`, `/usr/assets/overlays` and
+    /// `/assets/overlays`, none of which exist — so without these
+    /// candidates a packaged install resolves no overlays at all.
+    /// A per-user pack under `$XDG_DATA_HOME/matrisaver/overlays`
+    /// (default `~/.local/share/matrisaver/overlays`) leads the
+    /// system-wide one so a user can shadow the shipped art without
+    /// root, and `/usr/local/share` leads `/usr/share` so a hand-built
+    /// install beats a distro one.
+    fn shipped_overlay_pack_dirs() -> Vec<std::path::PathBuf> {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+        if let Some(base) = std::env::var_os("ProgramData") {
+            candidates.push(
+                std::path::PathBuf::from(base)
+                    .join("matrisaver")
+                    .join("overlays"),
+            );
+        }
+
+        if cfg!(unix) {
+            if let Some(base) = std::env::var_os("XDG_DATA_HOME") {
+                candidates.push(
+                    std::path::PathBuf::from(base)
+                        .join("matrisaver")
+                        .join("overlays"),
+                );
+            } else if let Some(home) = std::env::var_os("HOME") {
+                candidates.push(
+                    std::path::PathBuf::from(home)
+                        .join(".local")
+                        .join("share")
+                        .join("matrisaver")
+                        .join("overlays"),
+                );
+            }
+            candidates.push(std::path::PathBuf::from(
+                "/usr/local/share/matrisaver/overlays",
+            ));
+            candidates.push(std::path::PathBuf::from("/usr/share/matrisaver/overlays"));
+        }
+
+        let mut resolved: Vec<std::path::PathBuf> = Vec::new();
+        for candidate in candidates {
+            if candidate.is_dir() && !resolved.contains(&candidate) {
+                resolved.push(candidate);
+            }
+        }
+        resolved
     }
 
     /// Resolved overlay image queue, each entry `(image_path,
@@ -114,8 +164,9 @@ impl CoreRuntime {
     ///     so the film's signature scene always opens the cycle and the
     ///     user's images are woven in.
     ///   * If both produced nothing (a variant with no populated subdir
-    ///     and no user folders), fall back to the shared shipped pack
-    ///     (`%ProgramData%\matrisaver\overlays\`) and then the legacy
+    ///     and no user folders), fall back to the shared shipped packs
+    ///     (see `shipped_overlay_pack_dirs`: `%ProgramData%` on Windows,
+    ///     XDG + `/usr/share` on Unix) and then the legacy
     ///     `assets/overlays/` root, so a bare install still shows overlays.
     ///
     /// Dedup is by filename, first-occurrence-wins (so the variant copy
@@ -156,7 +207,7 @@ impl CoreRuntime {
         // 4. Fallback: shared shipped pack, then legacy root.
         let mut seen = std::collections::HashSet::<std::ffi::OsString>::new();
         let mut paths = Vec::new();
-        if let Some(pack) = Self::programdata_overlays_dir() {
+        for pack in Self::shipped_overlay_pack_dirs() {
             Self::collect_overlay_dir(&pack, false, &mut seen, &mut paths);
         }
         if paths.is_empty() {
@@ -194,14 +245,13 @@ impl CoreRuntime {
     }
 
     /// Overlays-root candidates a variant-pinned subdirectory can live
-    /// under: the ProgramData pack root (installed MSI) and the
-    /// legacy-resolved root (dev / source tree). Both are joined with
-    /// the variant subdir by `overlay_image_paths`.
+    /// under: the packaged pack roots (installed MSI or `.deb`, see
+    /// `shipped_overlay_pack_dirs`) and the legacy-resolved root (dev /
+    /// source tree). All are joined with the variant subdir by
+    /// `overlay_image_paths`.
     fn overlay_root_candidates(&self) -> Vec<std::path::PathBuf> {
         let mut roots = Vec::new();
-        if let Some(pack) = Self::programdata_overlays_dir() {
-            roots.push(pack);
-        }
+        roots.extend(Self::shipped_overlay_pack_dirs());
         if let Some(legacy) = self.resolve_overlay_directory() {
             roots.push(legacy);
         }

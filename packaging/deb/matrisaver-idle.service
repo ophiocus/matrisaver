@@ -1,0 +1,20 @@
+[Unit]
+Description=MatriSaver idle screensaver
+Documentation=file:///usr/share/doc/matrisaver/README.Debian
+# graphical-session.target is a *user* target. This must stay a user
+# unit: a system unit has no WAYLAND_DISPLAY or DISPLAY and MatriSaver
+# would exit 4 (no display session) every time.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/matrisaver/matrisaver-idle
+Restart=on-failure
+RestartSec=5s
+# Do not restart forever on a misconfiguration: exit 1 from the wrapper
+# means no idle daemon is installed, and exit 4 means no session.
+RestartPreventExitStatus=1 4
+
+[Install]
+WantedBy=graphical-session.target

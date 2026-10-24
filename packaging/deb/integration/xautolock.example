@@ -1,0 +1,21 @@
+# xautolock — X11 idle runner
+#
+# xautolock counts in whole minutes. -detectsleep re-arms the timer after
+# a suspend/resume cycle instead of firing immediately on wake.
+#
+# Add to ~/.xsession, ~/.xprofile or the session autostart:
+
+xautolock -time 5 -locker 'matrisaver --run' -detectsleep &
+
+# The flag is named -locker because xautolock predates the distinction;
+# MatriSaver still does not lock. To actually lock as well, chain a real
+# locker on xautolock's second stage:
+
+xautolock -time 5  -locker 'matrisaver --run' \
+          -killtime 15 -killer 'i3lock -c 000000' \
+          -detectsleep &
+
+# Force the X11 path on a session that also advertises Wayland
+# (XWayland sets both), e.g. to compare the two:
+#
+#   MATRISAVER_FORCE_SESSION=x11 matrisaver --run

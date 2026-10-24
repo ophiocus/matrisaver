@@ -47,12 +47,37 @@ Acceptance criteria:
 
 ## Milestone 3: Linux Packaging and Host Integration
 
+Status: Mostly complete — see the per-criterion notes. Reference docs:
+[`../development/LINUX_HOST.md`](../development/LINUX_HOST.md) and
+[`../release/LINUX_PACKAGING.md`](../release/LINUX_PACKAGING.md).
+
 Acceptance criteria:
 
-- Linux host supports multi-monitor full run mode.
-- `.deb` package installs runtime and integration helpers.
+- Linux host supports multi-monitor full run mode. **Implemented**: one
+  scene rendered at the union bounding box of every output, with one
+  borderless-fullscreen window per output presenting its own UV
+  sub-rectangle, so the cascade stays continuous across a bezel. Covered
+  by unit tests for side-by-side, stacked, negative-origin, mixed-
+  resolution, no-primary and oversized-span layouts; **not yet run
+  against two physical monitors** (the WSLg test host reports one
+  output).
+- `.deb` package installs runtime and integration helpers. **Done**:
+  `scripts/package-deb.sh`, lintian-clean, built on Ubuntu 24.04 and
+  install/remove verified on Debian 13.
 - Idle/lock integration documented and validated for target desktop(s).
+  **Documented, not validated**: helpers and a systemd user unit ship
+  for swayidle, xautolock and xss-lock, with GNOME/KDE directed to their
+  own idle management and xscreensaver `programs:` marked unsupported
+  (no `-window-id` protocol). Validation needs a real desktop session;
+  WSLg is not one.
 - Fallback behavior for unsupported compositor/GPU paths is explicit.
+  **Done**: session detection with a named exit code (4) and actionable
+  guidance, an ordered Vulkan-then-GL backend ladder with a `FALLBACK`
+  line per demotion and exit code 3 on total failure, and layout
+  demotion to primary-only when a span exceeds the texture limit. One
+  open question: the GL rung segfaults during teardown under WSLg after
+  rendering every frame correctly; cause not settled (see the Linux host
+  doc).
 
 ## Milestone 4: macOS Host and Draggable Distribution
 

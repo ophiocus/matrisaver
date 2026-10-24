@@ -1,0 +1,154 @@
+.TH MATRISAVER 1 "2026-10-23" "matrisaver @VERSION@" "User Commands"
+.SH NAME
+matrisaver \- Matrix-inspired digital rain screensaver
+.SH SYNOPSIS
+.B matrisaver
+.RI [ MODE ]
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B matrisaver
+renders the Matrix code cascade in native Rust on wgpu.
+.PP
+In playback mode it spans every monitor with one continuous scene: the
+cascade is rendered once at the union bounding box of all outputs, and
+each per-output window presents its own slice of that scene. Columns
+therefore do not restart at a bezel. A Wayland surface belongs to a
+single output and cannot span, which is why the host creates one window
+per output rather than one spanning window.
+.PP
+.B matrisaver
+is a screensaver, not a screen locker. It does not authenticate and does
+not secure the session; locking remains the desktop's responsibility.
+.SH MODES
+.TP
+.B \-\-run
+Fullscreen playback on every participating output. The default.
+.TP
+.B \-\-window
+Run in a single ordinary window.
+.TP
+.BI \-\-benchmark\-frames " N"
+Headless: advance the runtime
+.I N
+frames, print a
+.B PERF
+line, exit. The only mode that needs no compositor.
+.TP
+.B \-\-list\-adapters
+List the GPU adapters wgpu can enumerate, then exit.
+.TP
+.B \-\-list\-monitors
+List the outputs the compositor reports, then exit.
+.TP
+.B \-h ", " \-\-help
+Print usage and exit.
+.SH PLAYBACK OPTIONS
+.TP
+.BI \-\-variant " KEY"
+One of
+.BR original ", " reloaded ", " revolutions ", " resurrections ", " bane .
+.TP
+.BI \-\-pipeline " KEY"
+Override the variant's pipeline.
+.TP
+.BI \-\-glow\-quality " Q"
+.BR low ", " balanced " or " high .
+.TP
+.B \-\-overlay ", " \-\-no\-overlay
+Force the ASCII silhouette overlay on or off.
+.TP
+.B \-\-multi\-monitor ", " \-\-single\-monitor
+Span every output with one scene (default), or use the primary only.
+.TP
+.BI \-\-char\-size " N"
+Glyph cell size in pixels.
+.TP
+.B \-\-show\-cursor
+Leave the pointer visible during playback.
+.TP
+.BI \-\-settings " PATH"
+Load settings.json from
+.I PATH
+instead of the XDG config location.
+.SH GPU SELECTION
+.TP
+.BI \-\-wgpu\-backend " LIST"
+Comma-separated backend names, e.g.
+.BR vulkan,gl .
+An explicit request is never silently overridden.
+.TP
+.BI \-\-wgpu\-adapter\-name " S"
+Substring match against the adapter name.
+.SH DIAGNOSTICS
+Playback writes one-line records to standard error:
+.B SESSION
+(detected session type),
+.B SCENE
+(scene size and output count),
+.B SURFACE
+(which fallback rung succeeded, and the adapter),
+.B PRESENT_CHOICE
+(variant, pipeline, window count) and
+.B FALLBACK
+(one per demotion, with a reason). Quote these in a bug report.
+.TP
+.BI \-\-lifecycle\-frames " N"
+Exit after
+.I N
+rendered frames. Intended for soak tests.
+.TP
+.BI \-\-lifecycle\-trace " PATH"
+Append per-frame
+.B LIFECYCLE
+records to
+.IR PATH .
+.SH FILES
+.TP
+.I ~/.config/matrisaver/settings.json
+Settings, shared with the other hosts.
+.TP
+.I /usr/share/matrisaver/overlays
+Overlay image pack installed by this package. A per-user pack in
+.I $XDG_DATA_HOME/matrisaver/overlays
+takes precedence.
+.TP
+.I /usr/share/matrisaver/integration
+Idle-daemon examples for swayidle, xautolock and xss-lock.
+.TP
+.I /usr/libexec/matrisaver/matrisaver-idle
+Idle-launch wrapper used by the
+.B matrisaver-idle.service
+user unit.
+.SH ENVIRONMENT
+.TP
+.B MATRISAVER_FORCE_SESSION
+.BR wayland ", " x11 " or " headless .
+Overrides session detection.
+.TP
+.B MATRISAVER_OVERLAY_DIR
+Overlay image directory override.
+.TP
+.B WGPU_BACKEND ", " WGPU_ADAPTER_NAME
+Equivalent to the GPU selection flags.
+.SH EXIT STATUS
+.TP
+.B 0
+Clean exit, including playback dismissed by the user.
+.TP
+.B 1
+Runtime failure after startup.
+.TP
+.B 2
+Bad usage: unknown flag or unparseable value.
+.TP
+.B 3
+No usable GPU adapter on any backend.
+.TP
+.B 4
+Playback requested with no display session reachable.
+.SH SEE ALSO
+.BR swayidle (1),
+.BR xautolock (1),
+.BR xss-lock (1)
+.SH AUTHOR
+ophiocus. Source and issues: https://github.com/ophiocus/matrisaver
